@@ -20,6 +20,86 @@ SERVER = os.environ.get("LLAMA_URL", "http://localhost:8000")
 PICOCLAW = os.path.expanduser("~/Desktop/qwen/picoclaw/build/picoclaw-darwin-arm64")
 console = Console()
 
+# ── model configs ─────────────────────────────────
+MODELS = {
+    "9b": {
+        "path": os.path.expanduser("~/models/Qwen3.5-9B-Q4_K_M.gguf"),
+        "ctx": 32768,
+        "flags": "--flash-attn on --n-gpu-layers 99 --reasoning off -t 4",
+        "name": "Qwen3.5-9B",
+        "detail": "8.95B dense · Q4_K_M · 32K ctx",
+        "good_for": "tool calling, long conversations, agent tasks",
+    },
+    "35b": {
+        "path": os.path.expanduser("~/models/Qwen3.5-35B-A3B-UD-IQ2_M.gguf"),
+        "ctx": 8192,
+        "flags": "--flash-attn on --n-gpu-layers 99 --reasoning off -np 1 -t 4",
+        "name": "Qwen3.5-35B-A3B",
+        "detail": "MoE 34.7B · 3B active · IQ2_M · 8K ctx",
+        "good_for": "reasoning, math, knowledge, fast answers",
+    },
+}
+
+# ── smart routing ─────────────────────────────────
+TOOL_KEYWORDS = [
+    "search", "find", "look up", "google", "what time", "when do",
+    "when is", "weather", "news", "latest", "schedule", "score",
+    "price", "stock", "fetch", "download", "read file", "write file",
+    "create file", "run", "execute", "list files", "show me",
+    "open", "browse", "url", "http", "website",
+]
+
+def needs_tools(message):
+    """Detect if a message likely needs web search or tool use."""
+    lower = message.lower()
+    return any(kw in lower for kw in TOOL_KEYWORDS)
+
+def get_current_model():
+    """Check which model the running server has loaded."""
+    try:
+        req = urllib.request.Request(f"{SERVER}/props")
+        with urllib.request.urlopen(req, timeout=3) as r:
+            d = json.loads(r.read())
+        alias = d.get("model_alias", "") or d.get("model_path", "")
+        if "35B-A3B" in alias:
+            return "35b"
+        elif "9B" in alias:
+            return "9b"
+    except Exception:
+        pass
+    return None
+
+def swap_model(target_key):
+    """Stop current server and start a new one with the target model."""
+    cfg = MODELS[target_key]
+    if not os.path.exists(cfg["path"]):
+        return False, f"Model not found: {cfg['path']}"
+
+    # Kill current server
+    subprocess.run(["pkill", "-f", "llama-server"], capture_output=True)
+    time.sleep(3)
+
+    # Start new server
+    cmd = (
+        f"llama-server --model {cfg['path']} --port 8000 --host 127.0.0.1 "
+        f"--ctx-size {cfg['ctx']} {cfg['flags']}"
+    )
+    subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # Wait for ready
+    for i in range(30):
+        time.sleep(2)
+        try:
+            req = urllib.request.Request(f"{SERVER}/health")
+            with urllib.request.urlopen(req, timeout=2) as r:
+                d = json.loads(r.read())
+            if d.get("status") == "ok":
+                return True, f"Switched to {cfg['name']} ({cfg['ctx']} ctx)"
+        except Exception:
+            pass
+
+    return False, "Server failed to start"
+
 # ── ANSI strip ─────────────────────────────────────
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*m|\r')
 def strip_ansi(text):
@@ -304,7 +384,8 @@ COMMANDS = [
     ("/bench",       "Run a quick speed benchmark"),
     ("/clear",       "Clear conversation and start fresh"),
     ("/stats",       "Show session statistics"),
-    ("/model",       "Show current model info"),
+    ("/model",       "Show or switch model — /model 9b or /model 35b"),
+    ("/auto",        "Toggle smart auto-routing between 9B and 35B"),
     ("/tools",       "List available agent tools"),
     ("/system",      "Set system prompt — /system <message>"),
     ("/compact",     "Toggle compact output (no markdown rendering)"),
@@ -340,14 +421,16 @@ def main():
     session_id = f"mc-{int(time.time())}"
     use_agent = True
     compact_mode = False
+    auto_route = True  # smart routing between 9B and 35B
     work_dir = os.getcwd()
-    branch_save = None  # saved conversation checkpoint
+    branch_save = None
     loop_thread = None
     loop_running = False
 
     while True:
         try:
-            tag = "agent" if use_agent else "raw"
+            cur = get_current_model() or "?"
+            tag = f"{'auto' if auto_route else 'agent'} {cur}" if use_agent else "raw"
             console.print(f"  [dim]{tag}[/] [bold bright_yellow]>[/] ", end="")
             user_input = input()
         except (EOFError, KeyboardInterrupt):
@@ -391,8 +474,44 @@ def main():
                 console.print()
                 continue
             elif exact == "/model":
-                model_name, model_detail = detect_model()
-                console.print(f"  [bold white]{model_name}[/]  [dim]{model_detail}[/]\n")
+                # Check if user passed an argument like "/model 9b"
+                parts = cmd.split()
+                if len(parts) >= 2:
+                    target = parts[1].lower().replace("b", "b")
+                    if target in MODELS:
+                        console.print(f"  [dim]swapping to {MODELS[target]['name']}...[/]")
+                        display = WorkingDisplay()
+                        display.phase = f"loading {MODELS[target]['name']}"
+                        with Live(display.render(), console=console, refresh_per_second=8, transient=True) as live:
+                            ok, msg = swap_model(target)
+                            while not ok and display.frame < 100:
+                                display.frame += 1
+                                live.update(display.render())
+                                time.sleep(0.2)
+                        if ok:
+                            model_name = MODELS[target]["name"]
+                            model_detail = MODELS[target]["detail"]
+                            console.print(f"  [bold bright_green]{msg}[/]\n")
+                        else:
+                            console.print(f"  [bold red]{msg}[/]\n")
+                    else:
+                        console.print(f"  [dim]available: 9b, 35b[/]\n")
+                else:
+                    cur = get_current_model()
+                    model_name, model_detail = detect_model()
+                    console.print(f"  [bold white]{model_name}[/]  [dim]{model_detail}[/]")
+                    console.print(f"  [dim]auto-routing: {'on' if auto_route else 'off'}[/]")
+                    console.print(f"  [dim]switch: /model 9b  or  /model 35b[/]\n")
+                continue
+
+            elif exact == "/auto":
+                auto_route = not auto_route
+                state = "on" if auto_route else "off"
+                console.print(f"  [dim]smart auto-routing {state}[/]")
+                if auto_route:
+                    console.print(f"  [dim]  tools/search → 9B (32K ctx, reliable)[/]")
+                    console.print(f"  [dim]  reasoning     → 35B (faster, smarter)[/]")
+                console.print()
                 continue
             elif exact == "/tools":
                 for name, desc in [
@@ -649,35 +768,114 @@ def main():
         # ── agent mode ─────────────────────────────
         if use_agent:
             start = time.time()
+            use_tools = needs_tools(user_input)
+            current = get_current_model()
 
-            # Step 1: Use PicoClaw for tool calls (search, fetch)
-            display = WorkingDisplay()
-            display.phase = "searching"
-            picoclaw_response, events = picoclaw_call_live(user_input, session=session_id)
+            # Auto-route: swap model if needed
+            if auto_route and use_tools and current == "35b":
+                console.print("  [dim italic]routing to 9B (tools need 32K context)...[/]")
+                display = WorkingDisplay()
+                display.phase = "swapping to 9B"
+                with Live(display.render(), console=console, refresh_per_second=8, transient=True) as live:
+                    ok, msg = swap_model("9b")
+                    while not ok and display.frame < 100:
+                        display.frame += 1
+                        live.update(display.render())
+                        time.sleep(0.2)
+                if ok:
+                    model_name = MODELS["9b"]["name"]
+                    model_detail = MODELS["9b"]["detail"]
+                    console.print(f"  [dim]{msg}[/]\n")
+                else:
+                    console.print(f"  [bold red]{msg}[/]\n")
 
-            # Step 2: If PicoClaw hit tool iteration limit or returned an error,
-            # feed whatever it gathered + the original question to the LLM directly
-            is_error = (
-                "max_tool_iterations" in picoclaw_response
-                or "error processing" in picoclaw_response.lower()
-                or "Error:" in picoclaw_response
-                or not picoclaw_response
-            )
+            elif auto_route and not use_tools and current == "9b":
+                # Check if 35B model exists before trying to swap
+                if os.path.exists(MODELS["35b"]["path"]):
+                    console.print("  [dim italic]routing to 35B (faster reasoning)...[/]")
+                    display = WorkingDisplay()
+                    display.phase = "swapping to 35B"
+                    with Live(display.render(), console=console, refresh_per_second=8, transient=True) as live:
+                        ok, msg = swap_model("35b")
+                        while not ok and display.frame < 100:
+                            display.frame += 1
+                            live.update(display.render())
+                            time.sleep(0.2)
+                    if ok:
+                        model_name = MODELS["35b"]["name"]
+                        model_detail = MODELS["35b"]["detail"]
+                        console.print(f"  [dim]{msg}[/]\n")
 
-            if is_error:
-                # PicoClaw couldn't finish — ask the LLM directly with streaming
-                display.phase = "thinking"
+            # Now run the query
+            if use_tools:
+                # Use PicoClaw agent (tools enabled)
+                picoclaw_response, events = picoclaw_call_live(user_input, session=session_id)
+                elapsed = time.time() - start
+
+                is_error = (
+                    not picoclaw_response
+                    or "max_tool_iterations" in picoclaw_response
+                    or "error processing" in picoclaw_response.lower()
+                    or picoclaw_response.startswith("[agent error]")
+                )
+
+                if is_error:
+                    # Fallback: stream from LLM directly
+                    direct_msgs = list(messages) if messages else []
+                    direct_msgs.append({"role": "user", "content": user_input})
+                    full = ""
+                    tokens = 0
+                    first_token = True
+                    display = WorkingDisplay()
+                    display.phase = "thinking (fallback)"
+                    try:
+                        with Live(display.render(), console=console, refresh_per_second=8, transient=True) as live:
+                            gen = stream_llm(direct_msgs)
+                            for chunk in gen:
+                                if isinstance(chunk, str):
+                                    if first_token:
+                                        first_token = False
+                                        live.stop()
+                                        console.print("  ", end="")
+                                    console.print(chunk, end="", highlight=False)
+                                    full += chunk
+                                    tokens += 1
+                        elapsed = time.time() - start
+                        console.print("\n")
+                        render_speed(tokens, elapsed)
+                        session_tokens += tokens
+                        session_time += elapsed
+                        session_turns += 1
+                        messages.append({"role": "user", "content": user_input})
+                        messages.append({"role": "assistant", "content": full})
+                    except Exception as e:
+                        console.print(f"\n  [bold red]{e}[/]")
+                else:
+                    # Clean PicoClaw response
+                    render_timeline(events)
+                    console.print()
+                    if not compact_mode and any(c in picoclaw_response for c in ["##", "**", "```", "- ", "1. ", "* "]):
+                        console.print(Padding(Markdown(picoclaw_response), (0, 2)))
+                    else:
+                        for line in picoclaw_response.split("\n"):
+                            console.print(f"  {line}")
+                    console.print()
+                    tokens_est = len(picoclaw_response.split())
+                    render_speed(tokens_est, elapsed)
+                    session_tokens += tokens_est
+                    session_time += elapsed
+                    session_turns += 1
+            else:
+                # Direct LLM streaming (no tools needed)
+                messages.append({"role": "user", "content": user_input})
                 full = ""
                 tokens = 0
                 first_token = True
-
-                # Build a simple prompt — include any search context PicoClaw gathered
-                direct_msgs = list(messages) if messages else []
-                direct_msgs.append({"role": "user", "content": user_input})
-
+                display = WorkingDisplay()
+                display.phase = "thinking"
                 try:
                     with Live(display.render(), console=console, refresh_per_second=8, transient=True) as live:
-                        gen = stream_llm(direct_msgs)
+                        gen = stream_llm(messages)
                         for chunk in gen:
                             if isinstance(chunk, str):
                                 if first_token:
@@ -687,34 +885,21 @@ def main():
                                 console.print(chunk, end="", highlight=False)
                                 full += chunk
                                 tokens += 1
-
                     elapsed = time.time() - start
-                    console.print("\n")
+                    if not compact_mode and any(c in full for c in ["##", "**", "```", "- ", "1. "]):
+                        console.print("\n")
+                        console.print(Padding(Markdown(full), (0, 2)))
+                    else:
+                        console.print("\n")
                     render_speed(tokens, elapsed)
                     session_tokens += tokens
                     session_time += elapsed
                     session_turns += 1
-                    messages.append({"role": "user", "content": user_input})
                     messages.append({"role": "assistant", "content": full})
                 except Exception as e:
                     console.print(f"\n  [bold red]{e}[/]")
-            else:
-                # PicoClaw gave a clean response
-                elapsed = time.time() - start
-                render_timeline(events)
-                console.print()
-
-                if not compact_mode and any(c in picoclaw_response for c in ["##", "**", "```", "- ", "1. ", "* "]):
-                    console.print(Padding(Markdown(picoclaw_response), (0, 2)))
-                else:
-                    for line in picoclaw_response.split("\n"):
-                        console.print(f"  {line}")
-                console.print()
-                tokens_est = len(picoclaw_response.split())
-                render_speed(tokens_est, elapsed)
-                session_tokens += tokens_est
-                session_time += elapsed
-                session_turns += 1
+                    if messages and messages[-1]["role"] == "user":
+                        messages.pop()
 
         # ── raw streaming mode ─────────────────────
         else:
