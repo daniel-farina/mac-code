@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mac code</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Chicago&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --beige: #f5e6c8;
+    --beige-dark: #e8d5a8;
+    --beige-shadow: #c4a66a;
+    --screen-bg: #1a1a2e;
+    --screen-green: #33ff33;
+    --screen-cyan: #00ffff;
+    --screen-yellow: #ffcc00;
+    --screen-dim: #448844;
+    --screen-white: #e0e0e0;
+    --menu-bg: #ffffff;
+    --menu-border: #000000;
+  }
+
+  body {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "Chicago", "Monaco", "Courier New", monospace;
+    overflow: hidden;
+  }
+
+  /* ── The Macintosh ── */
+  .mac {
+    position: relative;
+    width: 520px;
+  }
+
+  .mac-body {
+    background: var(--beige);
+    border-radius: 18px 18px 4px 4px;
+    padding: 22px 22px 14px 22px;
+    box-shadow:
+      0 8px 0 var(--beige-shadow),
+      0 12px 30px rgba(0,0,0,0.5),
+      inset 0 1px 0 rgba(255,255,255,0.4);
+    position: relative;
+  }
+
+  .mac-body::before {
+    content: '';
+    position: absolute;
+    top: 6px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 60px;
+    height: 4px;
+    background: var(--beige-dark);
+    border-radius: 2px;
+  }
+
+  /* ── Screen bezel ── */
+  .screen-bezel {
+    background: #111;
+    border-radius: 12px;
+    padding: 8px;
+    box-shadow:
+      inset 0 2px 8px rgba(0,0,0,0.8),
+      0 1px 0 rgba(255,255,255,0.1);
+  }
+
+  /* ── CRT Screen ── */
+  .screen {
+    background: var(--screen-bg);
+    border-radius: 8px;
+    height: 380px;
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* CRT scanline effect */
+  .screen::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.08) 2px,
+      rgba(0,0,0,0.08) 4px
+    );
+    pointer-events: none;
+    z-index: 10;
+  }
+
+  /* CRT glow */
+  .screen::before {
+    content: '';
+    position: absolute;
+    top: -2px; left: -2px; right: -2px; bottom: -2px;
+    background: radial-gradient(ellipse at center, rgba(51,255,51,0.03) 0%, transparent 70%);
+    pointer-events: none;
+    z-index: 11;
+  }
+
+  /* ── Menu bar ── */
+  .menu-bar {
+    background: var(--menu-bg);
+    border-bottom: 1px solid #000;
+    padding: 2px 8px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 11px;
+    height: 20px;
+    flex-shrink: 0;
+  }
+
+  .menu-apple {
+    font-size: 14px;
+    cursor: pointer;
+  }
+
+  .menu-item {
+    cursor: pointer;
+    font-weight: bold;
+    font-size: 11px;
+  }
+
+  .menu-item:hover { text-decoration: underline; }
+
+  .menu-right {
+    margin-left: auto;
+    font-size: 10px;
+    color: #555;
+  }
+
+  /* ── Terminal area ── */
+  .terminal {
+    flex: 1;
+    padding: 10px 12px;
+    overflow-y: auto;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--screen-green);
+    scrollbar-width: none;
+  }
+
+  .terminal::-webkit-scrollbar { display: none; }
+
+  .line { margin-bottom: 2px; white-space: pre-wrap; word-wrap: break-word; }
+  .line-cyan { color: var(--screen-cyan); }
+  .line-yellow { color: var(--screen-yellow); }
+  .line-dim { color: var(--screen-dim); }
+  .line-white { color: var(--screen-white); }
+  .line-bold { font-weight: bold; }
+  .line-error { color: #ff4444; }
+
+  /* ── Input line ── */
+  .input-area {
+    padding: 4px 12px 8px 12px;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+  }
+
+  .prompt {
+    color: var(--screen-dim);
+    font-size: 13px;
+    margin-right: 4px;
+    white-space: nowrap;
+  }
+
+  .prompt-arrow {
+    color: var(--screen-yellow);
+    font-weight: bold;
+    margin-right: 6px;
+  }
+
+  #input {
+    background: transparent;
+    border: none;
+    color: var(--screen-green);
+    font-family: inherit;
+    font-size: 13px;
+    flex: 1;
+    outline: none;
+    caret-color: var(--screen-green);
+  }
+
+  .cursor-blink {
+    display: inline-block;
+    width: 8px;
+    height: 14px;
+    background: var(--screen-green);
+    animation: blink 1s step-end infinite;
+    vertical-align: middle;
+    margin-left: 2px;
+  }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+
+  /* ── Slash menu ── */
+  .slash-menu {
+    display: none;
+    padding: 4px 12px;
+    max-height: 140px;
+    overflow-y: auto;
+    scrollbar-width: none;
+  }
+
+  .slash-menu::-webkit-scrollbar { display: none; }
+
+  .slash-menu.visible { display: block; }
+
+  .slash-item {
+    padding: 2px 0;
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+  }
+
+  .slash-item:hover { background: rgba(51,255,51,0.1); }
+
+  .slash-cmd {
+    color: var(--screen-cyan);
+    font-weight: bold;
+    width: 110px;
+    flex-shrink: 0;
+  }
+
+  .slash-desc { color: var(--screen-dim); }
+
+  /* ── Mac base ── */
+  .mac-base {
+    background: var(--beige);
+    height: 28px;
+    border-radius: 0 0 18px 18px;
+    box-shadow:
+      0 4px 0 var(--beige-shadow),
+      0 8px 20px rgba(0,0,0,0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .mac-label {
+    font-size: 10px;
+    color: var(--beige-shadow);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+
+  /* ── Floppy slot ── */
+  .floppy-slot {
+    position: absolute;
+    right: 22px;
+    bottom: 42px;
+    width: 80px;
+    height: 6px;
+    background: #333;
+    border-radius: 1px;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,0.5);
+  }
+
+  /* ── Loading dots ── */
+  .loading-dots span {
+    animation: loadDot 1.4s infinite;
+    animation-fill-mode: both;
+  }
+  .loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+  .loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+  @keyframes loadDot {
+    0%, 80%, 100% { opacity: 0.2; }
+    40% { opacity: 1; }
+  }
+
+  /* ── Typing animation ── */
+  @keyframes typewriter {
+    from { width: 0; }
+    to { width: 100%; }
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 560px) {
+    .mac { width: 95vw; }
+    .screen { height: 320px; }
+    .terminal { font-size: 11px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="mac">
+  <div class="mac-body">
+    <div class="screen-bezel">
+      <div class="screen">
+        <!-- Menu bar -->
+        <div class="menu-bar">
+          <span class="menu-apple">&#63743;</span>
+          <span class="menu-item">File</span>
+          <span class="menu-item">Edit</span>
+          <span class="menu-item">View</span>
+          <span class="menu-item">Help</span>
+          <span class="menu-right" id="clock">12:00 PM</span>
+        </div>
+
+        <!-- Terminal output -->
+        <div class="terminal" id="terminal"></div>
+
+        <!-- Slash command menu -->
+        <div class="slash-menu" id="slashMenu"></div>
+
+        <!-- Input -->
+        <div class="input-area">
+          <span class="prompt">auto 9b</span>
+          <span class="prompt-arrow">></span>
+          <input type="text" id="input" autocomplete="off" spellcheck="false" autofocus placeholder="">
+        </div>
+      </div>
+    </div>
+    <div class="floppy-slot"></div>
+  </div>
+  <div class="mac-base">
+    <span class="mac-label">mac code</span>
+  </div>
+</div>
+
+<script>
+const terminal = document.getElementById('terminal');
+const input = document.getElementById('input');
+const slashMenu = document.getElementById('slashMenu');
+const clock = document.getElementById('clock');
+
+// Update clock
+function updateClock() {
+  const now = new Date();
+  clock.textContent = now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+}
+updateClock();
+setInterval(updateClock, 60000);
+
+// Slash commands
+const COMMANDS = [
+  ["/agent",   "Switch to agent mode (tools + web search)"],
+  ["/raw",     "Switch to raw mode (direct streaming)"],
+  ["/model",   "Show or switch model — /model 9b or 35b"],
+  ["/auto",    "Toggle smart auto-routing between models"],
+  ["/search",  "Quick web search — /search <query>"],
+  ["/btw",     "Side question without context"],
+  ["/bench",   "Run speed benchmark"],
+  ["/branch",  "Save conversation checkpoint"],
+  ["/restore", "Restore checkpoint"],
+  ["/stats",   "Session statistics"],
+  ["/tools",   "List available tools"],
+  ["/clear",   "Clear conversation"],
+  ["/cost",    "Show cost savings vs cloud"],
+  ["/compact", "Toggle markdown rendering"],
+  ["/quit",    "Exit mac code"],
+];
+
+// State
+let history = [];
+let historyIdx = -1;
+let sessionTurns = 0;
+let sessionTokens = 0;
+let currentModel = "9b";
+let autoRoute = true;
+
+// Simulated responses
+const RESPONSES = {
+  "hello": "Hello! I'm running locally on your Mac via Apple Silicon. How can I help?",
+  "hi": "Hey! 30 tok/s, zero cloud, zero cost. What do you want to build?",
+  "what are you": "I'm mac code — an open-source AI agent running Qwen3.5 locally on Apple Silicon. No API keys, no cloud, no cost per token.",
+  "what can you do": "I can search the web, read/write files, run shell commands, and answer questions — all powered by a local LLM on your Mac. Type / to see all commands.",
+};
+
+function addLine(text, cls = '') {
+  const div = document.createElement('div');
+  div.className = `line ${cls}`;
+  div.textContent = text;
+  terminal.appendChild(div);
+  terminal.scrollTop = terminal.scrollHeight;
+}
+
+function addHTML(html) {
+  const div = document.createElement('div');
+  div.className = 'line';
+  div.innerHTML = html;
+  terminal.appendChild(div);
+  terminal.scrollTop = terminal.scrollHeight;
+}
+
+async function typeText(text, cls = '', delay = 20) {
+  const div = document.createElement('div');
+  div.className = `line ${cls}`;
+  terminal.appendChild(div);
+  for (let i = 0; i < text.length; i++) {
+    div.textContent += text[i];
+    terminal.scrollTop = terminal.scrollHeight;
+    await new Promise(r => setTimeout(r, delay));
+  }
+}
+
+function showLoading() {
+  const div = document.createElement('div');
+  div.className = 'line line-cyan';
+  div.id = 'loading';
+  div.innerHTML = '  <span class="loading-dots"><span>⠋</span> thinking</span>';
+  terminal.appendChild(div);
+  terminal.scrollTop = terminal.scrollHeight;
+
+  let frame = 0;
+  const dots = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+  const interval = setInterval(() => {
+    frame++;
+    const el = document.getElementById('loading');
+    if (!el) { clearInterval(interval); return; }
+    const phases = ['thinking', 'searching', 'reasoning', 'generating'];
+    const phase = phases[Math.floor(frame / 8) % phases.length];
+    el.innerHTML = `  <span class="loading-dots"><span>${dots[frame % dots.length]}</span> ${phase}  ${frame}s</span>`;
+  }, 150);
+
+  return interval;
+}
+
+function hideLoading(interval) {
+  clearInterval(interval);
+  const el = document.getElementById('loading');
+  if (el) el.remove();
+}
+
+function showSlashMenu(filter = '') {
+  const matches = filter === '/'
+    ? COMMANDS
+    : COMMANDS.filter(([cmd]) => cmd.startsWith(filter));
+
+  if (matches.length === 0) {
+    slashMenu.classList.remove('visible');
+    return;
+  }
+
+  slashMenu.innerHTML = matches.map(([cmd, desc]) =>
+    `<div class="slash-item" data-cmd="${cmd}">
+      <span class="slash-cmd">${cmd}</span>
+      <span class="slash-desc">${desc}</span>
+    </div>`
+  ).join('');
+
+  slashMenu.classList.add('visible');
+
+  // Click handler
+  slashMenu.querySelectorAll('.slash-item').forEach(el => {
+    el.addEventListener('click', () => {
+      input.value = el.dataset.cmd + ' ';
+      slashMenu.classList.remove('visible');
+      input.focus();
+    });
+  });
+}
+
+async function handleCommand(text) {
+  const lower = text.toLowerCase().trim();
+
+  // Slash commands
+  if (lower === '/') {
+    showSlashMenu('/');
+    return;
+  }
+
+  if (lower === '/clear') {
+    terminal.innerHTML = '';
+    showBanner();
+    return;
+  }
+
+  if (lower === '/stats') {
+    addLine(`  turns     ${sessionTurns}`, 'line-cyan');
+    addLine(`  tokens    ${sessionTokens.toLocaleString()}`, 'line-cyan');
+    addLine(`  model     ${currentModel === '9b' ? 'Qwen3.5-9B' : 'Qwen3.5-35B-A3B'}`, 'line-cyan');
+    addLine(`  auto      ${autoRoute ? 'on' : 'off'}`, 'line-cyan');
+    addLine('');
+    return;
+  }
+
+  if (lower === '/model') {
+    addLine(`  Qwen3.5-${currentModel === '9b' ? '9B' : '35B-A3B'}`, 'line-white line-bold');
+    addLine(`  switch: /model 9b  or  /model 35b`, 'line-dim');
+    addLine('');
+    return;
+  }
+
+  if (lower === '/model 9b' || lower === '/model 35b') {
+    const target = lower.includes('9b') ? '9b' : '35b';
+    currentModel = target;
+    const interval = showLoading();
+    await new Promise(r => setTimeout(r, 1500));
+    hideLoading(interval);
+    addLine(`  Switched to ${target === '9b' ? 'Qwen3.5-9B (32K ctx)' : 'Qwen3.5-35B-A3B (8K ctx)'}`, 'line-cyan');
+    addLine('');
+    return;
+  }
+
+  if (lower === '/auto') {
+    autoRoute = !autoRoute;
+    addLine(`  smart auto-routing ${autoRoute ? 'on' : 'off'}`, 'line-dim');
+    if (autoRoute) {
+      addLine(`    tools/search → 9B (32K ctx, reliable)`, 'line-dim');
+      addLine(`    reasoning    → 35B (faster, smarter)`, 'line-dim');
+    }
+    addLine('');
+    return;
+  }
+
+  if (lower === '/tools') {
+    const tools = [
+      ['web_search', 'DuckDuckGo'],
+      ['web_fetch', 'read URLs'],
+      ['exec', 'shell commands'],
+      ['read_file', 'local files'],
+      ['write_file', 'create files'],
+    ];
+    tools.forEach(([name, desc]) => {
+      addHTML(`  <span style="color:var(--screen-cyan)">▸ ${name}</span>  <span style="color:var(--screen-dim)">${desc}</span>`);
+    });
+    addLine('');
+    return;
+  }
+
+  if (lower === '/bench') {
+    const interval = showLoading();
+    await new Promise(r => setTimeout(r, 2000));
+    hideLoading(interval);
+    const speed = currentModel === '35b' ? (28 + Math.random() * 8).toFixed(1) : (15 + Math.random() * 5).toFixed(1);
+    addHTML(`  <span style="color:#33ff33;font-weight:bold">${speed} tok/s</span> generation`);
+    addLine(`  ${(60 + Math.random() * 30).toFixed(1)} tok/s prompt processing`, 'line-cyan');
+    addLine('');
+    return;
+  }
+
+  if (lower === '/cost') {
+    addHTML(`  <span style="color:#33ff33;font-weight:bold">$0.00</span> spent locally`);
+    addLine(`  ~$0.34/hr would cost on cloud GPU`, 'line-dim');
+    addLine('');
+    return;
+  }
+
+  if (lower.startsWith('/search ')) {
+    const query = text.slice(8).trim();
+    const interval = showLoading();
+    await new Promise(r => setTimeout(r, 2500 + Math.random() * 2000));
+    hideLoading(interval);
+    addLine(`  Searched for: "${query}"`, 'line-dim');
+    addLine('');
+    await typeText(`  Based on web results, here's what I found about "${query}": This is a simulated response. In the real mac code agent, this would return actual DuckDuckGo search results processed by the local LLM.`, 'line-white', 15);
+    addLine('');
+    const speed = (25 + Math.random() * 10).toFixed(1);
+    addHTML(`  <span style="color:#33ff33">${speed} tok/s</span>  <span style="color:var(--screen-dim)">·  42 tokens  ·  1.4s</span>`);
+    addLine('');
+    sessionTurns++;
+    sessionTokens += 42;
+    return;
+  }
+
+  if (lower === '/quit') {
+    addLine('');
+    addLine(`  mac code  ${sessionTurns} turns · ${sessionTokens} tokens`, 'line-yellow');
+    addLine('');
+    addLine('  Goodbye!', 'line-dim');
+    input.disabled = true;
+    return;
+  }
+
+  // Regular chat
+  slashMenu.classList.remove('visible');
+
+  // Check for keyword match
+  const match = Object.keys(RESPONSES).find(k => lower.includes(k));
+
+  // Simulate auto-routing
+  const needsTools = ['search', 'find', 'look up', 'google', 'weather', 'news', 'latest', 'when', 'score', 'price'].some(k => lower.includes(k));
+
+  if (autoRoute && needsTools && currentModel === '35b') {
+    addLine('  routing to 9B (tools need 32K context)...', 'line-dim');
+    const swapInterval = showLoading();
+    await new Promise(r => setTimeout(r, 1500));
+    hideLoading(swapInterval);
+    currentModel = '9b';
+    addLine('  Switched to Qwen3.5-9B', 'line-cyan');
+    addLine('');
+  }
+
+  const interval = showLoading();
+  const thinkTime = 1500 + Math.random() * 2500;
+  await new Promise(r => setTimeout(r, thinkTime));
+  hideLoading(interval);
+
+  if (match) {
+    await typeText(`  ${RESPONSES[match]}`, 'line-white', 18);
+  } else {
+    // Generate a plausible response
+    const responses = [
+      `That's a great question! As a local AI running on Apple Silicon at 30 tok/s, I can help with that. In the full mac code agent, I would use web search and my 9B/35B models to give you a detailed answer.`,
+      `Interesting! Running locally means your data never leaves your Mac. The Qwen3.5 model can handle this — try the full agent with 'python3 agent.py' for real responses with tool use.`,
+      `I'm processing this on the Metal GPU right now — no cloud, no API calls. For the full experience with web search and file operations, clone the repo and run the agent locally!`,
+    ];
+    const resp = responses[Math.floor(Math.random() * responses.length)];
+    await typeText(`  ${resp}`, 'line-white', 18);
+  }
+
+  addLine('');
+  const tokens = 30 + Math.floor(Math.random() * 80);
+  const elapsed = (tokens / (currentModel === '35b' ? 30 : 18)).toFixed(1);
+  const speed = (tokens / elapsed).toFixed(1);
+  addHTML(`  <span style="color:#33ff33">${speed} tok/s</span>  <span style="color:var(--screen-dim)">·  ${tokens} tokens  ·  ${elapsed}s</span>`);
+  addLine('');
+
+  sessionTurns++;
+  sessionTokens += tokens;
+}
+
+function showBanner() {
+  addLine('');
+  addHTML('  <span style="color:var(--screen-yellow);font-weight:bold">🍎 mac code</span>');
+  addLine('  claude code, but it runs on your Mac for free', 'line-dim');
+  addLine('');
+  addHTML('  <span style="color:var(--screen-dim)">model </span> <span style="color:var(--screen-white);font-weight:bold">Qwen3.5-9B</span>  <span style="color:var(--screen-dim)">8.95B dense · Q4_K_M · 32K ctx</span>');
+  addHTML('  <span style="color:var(--screen-dim)">tools </span> <span style="color:var(--screen-white);font-weight:bold">search · fetch · exec · files</span>');
+  addHTML('  <span style="color:var(--screen-dim)">cost  </span> <span style="color:#33ff33;font-weight:bold">$0.00/hr</span>  <span style="color:var(--screen-dim)">Apple M4 Metal · localhost:8000</span>');
+  addLine('');
+  addLine('  ─────────────────────────────────────────', 'line-dim');
+  addLine('  type / to see all commands', 'line-dim');
+  addLine('');
+}
+
+// Boot sequence
+async function boot() {
+  addLine('  Macintosh System 2026.1', 'line-dim');
+  await new Promise(r => setTimeout(r, 400));
+  addLine('  Loading mac code...', 'line-dim');
+  await new Promise(r => setTimeout(r, 300));
+  addLine('  Metal GPU: Apple M4 (unified memory)', 'line-dim');
+  await new Promise(r => setTimeout(r, 200));
+  addLine('  Model: Qwen3.5-9B Q4_K_M (5.28 GB)', 'line-dim');
+  await new Promise(r => setTimeout(r, 200));
+  addLine('  33/33 layers offloaded to GPU', 'line-dim');
+  await new Promise(r => setTimeout(r, 300));
+  addLine('  Server listening on localhost:8000', 'line-dim');
+  await new Promise(r => setTimeout(r, 500));
+  terminal.innerHTML = '';
+  showBanner();
+  input.focus();
+}
+
+// Input handling
+input.addEventListener('input', () => {
+  const val = input.value;
+  if (val.startsWith('/')) {
+    showSlashMenu(val);
+  } else {
+    slashMenu.classList.remove('visible');
+  }
+});
+
+input.addEventListener('keydown', async (e) => {
+  if (e.key === 'Enter') {
+    const text = input.value.trim();
+    if (!text) return;
+
+    // Show what user typed
+    const tag = `${autoRoute ? 'auto' : 'agent'} ${currentModel}`;
+    addHTML(`  <span style="color:var(--screen-dim)">${tag}</span> <span style="color:var(--screen-yellow);font-weight:bold">></span> <span style="color:var(--screen-green)">${text}</span>`);
+    addLine('');
+
+    history.unshift(text);
+    historyIdx = -1;
+    input.value = '';
+    slashMenu.classList.remove('visible');
+
+    input.disabled = true;
+    await handleCommand(text);
+    input.disabled = false;
+    input.focus();
+
+    // Update prompt
+    document.querySelector('.prompt').textContent = `${autoRoute ? 'auto' : 'agent'} ${currentModel}`;
+  }
+
+  // History navigation
+  if (e.key === 'ArrowUp' && history.length > 0) {
+    historyIdx = Math.min(historyIdx + 1, history.length - 1);
+    input.value = history[historyIdx];
+    e.preventDefault();
+  }
+  if (e.key === 'ArrowDown') {
+    historyIdx = Math.max(historyIdx - 1, -1);
+    input.value = historyIdx >= 0 ? history[historyIdx] : '';
+    e.preventDefault();
+  }
+
+  // Tab completion
+  if (e.key === 'Tab' && input.value.startsWith('/')) {
+    e.preventDefault();
+    const matches = COMMANDS.filter(([cmd]) => cmd.startsWith(input.value));
+    if (matches.length === 1) {
+      input.value = matches[0][0] + ' ';
+      slashMenu.classList.remove('visible');
+    }
+  }
+
+  // Escape closes menu
+  if (e.key === 'Escape') {
+    slashMenu.classList.remove('visible');
+  }
+});
+
+// Click anywhere on screen focuses input
+document.querySelector('.screen').addEventListener('click', () => input.focus());
+
+// Boot!
+boot();
+</script>
+
+</body>
+</html>
