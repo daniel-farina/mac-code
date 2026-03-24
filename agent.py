@@ -649,28 +649,72 @@ def main():
         # ── agent mode ─────────────────────────────
         if use_agent:
             start = time.time()
-            response, events = picoclaw_call_live(user_input, session=session_id)
-            elapsed = time.time() - start
 
-            if response:
-                # Show what the agent did
+            # Step 1: Use PicoClaw for tool calls (search, fetch)
+            display = WorkingDisplay()
+            display.phase = "searching"
+            picoclaw_response, events = picoclaw_call_live(user_input, session=session_id)
+
+            # Step 2: If PicoClaw hit tool iteration limit or returned an error,
+            # feed whatever it gathered + the original question to the LLM directly
+            is_error = (
+                "max_tool_iterations" in picoclaw_response
+                or "error processing" in picoclaw_response.lower()
+                or "Error:" in picoclaw_response
+                or not picoclaw_response
+            )
+
+            if is_error:
+                # PicoClaw couldn't finish — ask the LLM directly with streaming
+                display.phase = "thinking"
+                full = ""
+                tokens = 0
+                first_token = True
+
+                # Build a simple prompt — include any search context PicoClaw gathered
+                direct_msgs = list(messages) if messages else []
+                direct_msgs.append({"role": "user", "content": user_input})
+
+                try:
+                    with Live(display.render(), console=console, refresh_per_second=8, transient=True) as live:
+                        gen = stream_llm(direct_msgs)
+                        for chunk in gen:
+                            if isinstance(chunk, str):
+                                if first_token:
+                                    first_token = False
+                                    live.stop()
+                                    console.print("  ", end="")
+                                console.print(chunk, end="", highlight=False)
+                                full += chunk
+                                tokens += 1
+
+                    elapsed = time.time() - start
+                    console.print("\n")
+                    render_speed(tokens, elapsed)
+                    session_tokens += tokens
+                    session_time += elapsed
+                    session_turns += 1
+                    messages.append({"role": "user", "content": user_input})
+                    messages.append({"role": "assistant", "content": full})
+                except Exception as e:
+                    console.print(f"\n  [bold red]{e}[/]")
+            else:
+                # PicoClaw gave a clean response
+                elapsed = time.time() - start
                 render_timeline(events)
                 console.print()
 
-                # Render response
-                if not compact_mode and any(c in response for c in ["##", "**", "```", "- ", "1. ", "* "]):
-                    console.print(Padding(Markdown(response), (0, 2)))
+                if not compact_mode and any(c in picoclaw_response for c in ["##", "**", "```", "- ", "1. ", "* "]):
+                    console.print(Padding(Markdown(picoclaw_response), (0, 2)))
                 else:
-                    for line in response.split("\n"):
+                    for line in picoclaw_response.split("\n"):
                         console.print(f"  {line}")
                 console.print()
-                tokens_est = len(response.split())
+                tokens_est = len(picoclaw_response.split())
                 render_speed(tokens_est, elapsed)
                 session_tokens += tokens_est
                 session_time += elapsed
                 session_turns += 1
-            else:
-                console.print("  [bold red]no response[/]")
 
         # ── raw streaming mode ─────────────────────
         else:
