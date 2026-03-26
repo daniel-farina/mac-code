@@ -1,122 +1,135 @@
 #!/usr/bin/env python3
-"""
-Codex <-> llama.cpp proxy.
-Fixes tool type mismatch and properly streams SSE responses.
-
-Usage:
-    python3 codex-proxy.py                     # :8001 -> :8080
-    UPSTREAM_PORT=8000 python3 codex-proxy.py  # :8001 -> :8000
-"""
-
-import json, sys, os, socket, signal, time
+"""Codex <-> llama.cpp proxy with full debug logging."""
+import json, sys, os, socket, signal, time, http.client
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.request import Request, urlopen
 
-UPSTREAM = f"http://localhost:{os.environ.get('UPSTREAM_PORT', '8080')}"
+UPSTREAM_HOST = "localhost"
+UPSTREAM_PORT = int(os.environ.get('UPSTREAM_PORT', '8080'))
 PORT = int(os.environ.get('PROXY_PORT', '8001'))
+LOG = "/tmp/codex_proxy_debug.log"
+
+def log(msg):
+    ts = time.strftime("%H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line, file=sys.stderr, flush=True)
+    with open(LOG, "a") as f:
+        f.write(line + "\n")
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+        log(f"POST {self.path} ({len(body)} bytes)")
 
         try:
             data = json.loads(body)
-
-            # Fix non-function tool types (Codex sends web_search_preview etc)
+            # Fix 1: Remove non-function tools
             if 'tools' in data:
-                fixed = []
-                for t in data['tools']:
-                    if t.get('type') == 'function':
-                        fixed.append(t)
-                    else:
-                        # Convert to function type
-                        name = t.get('name', t.get('type', 'unknown'))
-                        fixed.append({
-                            "type": "function",
-                            "name": name,
-                            "description": t.get('description', f'{name} tool'),
-                            "parameters": t.get('parameters', t.get('input_schema',
-                                {"type": "object", "properties": {}})),
-                        })
-                        print(f"[proxy] fixed tool type: {t.get('type')} -> function ({name})", file=sys.stderr)
-                data['tools'] = fixed
-
-            body = json.dumps(data).encode()
+                before = len(data['tools'])
+                data['tools'] = [t for t in data['tools'] if t.get('type') == 'function']
+                if len(data['tools']) < before:
+                    log(f"  removed {before - len(data['tools'])} non-function tools")
+            # Fix 2: Remove instructions (Qwen template ordering issue)
+            if 'instructions' in data:
+                log(f"  removed instructions ({len(data['instructions'])} chars)")
+                data.pop('instructions')
+            # Fix 3: Convert developer role to user
+            for item in data.get('input', []):
+                if item.get('role') == 'developer':
+                    item['role'] = 'user'
+                    log("  converted developer -> user")
+            # Only keep fields llama.cpp accepts
+            clean = {
+                "model": data.get("model", "local"),
+                "input": data.get("input", []),
+                "tools": data.get("tools", []),
+                "stream": data.get("stream", True),
+                "tool_choice": data.get("tool_choice", "auto"),
+            }
+            body = json.dumps(clean).encode('utf-8')
+            log(f"  fixed body: {len(body)} bytes, {len(clean.get('tools',[]))} tools")
         except Exception as e:
-            print(f"[proxy] parse error: {e}", file=sys.stderr)
+            log(f"  JSON error: {e}")
 
-        # Forward request and stream response byte-by-byte
+        # Forward to llama-server
         try:
-            req = Request(
-                f"{UPSTREAM}{self.path}",
-                data=body,
-                headers={k: v for k, v in self.headers.items() if k.lower() != 'host'},
-                method='POST',
-            )
+            conn = http.client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=600)
+            hdrs = {k: v for k, v in self.headers.items() if k.lower() not in ('host','transfer-encoding')}
+            hdrs['Content-Length'] = str(len(body))
+            log(f"  forwarding to {UPSTREAM_HOST}:{UPSTREAM_PORT}")
+            conn.request('POST', self.path, body=body, headers=hdrs)
+            resp = conn.getresponse()
+            log(f"  upstream response: {resp.status} {resp.getheader('Content-Type','?')}")
 
-            with urlopen(req, timeout=600) as resp:
+            if resp.status >= 400:
+                err = resp.read()
+                log(f"  ERROR: {err[:300]}")
                 self.send_response(resp.status)
-                # Forward ALL headers including content-type (critical for SSE)
-                for k, v in resp.getheaders():
-                    if k.lower() not in ('transfer-encoding', 'connection', 'content-length'):
-                        self.send_header(k, v)
+                self.send_header('Content-Type', 'application/json')
                 self.end_headers()
+                self.wfile.write(err)
+                conn.close()
+                return
 
-                # Stream byte-by-byte for SSE support
-                while True:
-                    chunk = resp.read(1)
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
+            # Forward response headers
+            self.send_response(resp.status)
+            for k, v in resp.getheaders():
+                if k.lower() not in ('transfer-encoding', 'connection'):
+                    self.send_header(k, v)
+            self.end_headers()
+            self.wfile.flush()
+            log("  headers sent, streaming...")
+
+            # Stream response byte by byte
+            total = 0
+            start = time.time()
+            while True:
+                byte = resp.read(1)
+                if not byte:
+                    break
+                self.wfile.write(byte)
+                total += 1
+                if byte == b"\n":
                     self.wfile.flush()
+            self.wfile.flush()
+            elapsed = time.time() - start
+            log(f"  streamed {total} bytes in {elapsed:.1f}s")
+            conn.close()
 
+        except BrokenPipeError:
+            log("  client disconnected (broken pipe)")
         except Exception as e:
-            print(f"[proxy] error: {e}", file=sys.stderr)
+            log(f"  EXCEPTION: {type(e).__name__}: {e}")
             try:
                 self.send_response(500)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
-                self.wfile.write(json.dumps({"error": {"message": str(e)}}).encode())
-            except Exception:
-                pass
+                self.wfile.write(json.dumps({"error":{"message":str(e)}}).encode())
+            except: pass
 
     def do_GET(self):
         try:
-            req = Request(f"{UPSTREAM}{self.path}")
-            with urlopen(req, timeout=10) as resp:
-                body = resp.read()
-                self.send_response(resp.status)
-                for k, v in resp.getheaders():
-                    if k.lower() not in ('transfer-encoding', 'connection'):
-                        self.send_header(k, v)
-                self.end_headers()
-                self.wfile.write(body)
-        except Exception:
-            self.send_response(502)
-            self.end_headers()
+            conn = http.client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=10)
+            conn.request('GET', self.path)
+            r = conn.getresponse(); b = r.read()
+            self.send_response(r.status)
+            for k,v in r.getheaders():
+                if k.lower() not in ('transfer-encoding','connection'): self.send_header(k,v)
+            self.end_headers(); self.wfile.write(b); conn.close()
+        except: self.send_response(502); self.end_headers()
 
-    def log_message(self, format, *args):
-        print(f"[proxy] {args[0]}", file=sys.stderr)
-
+    def log_message(self, *a): pass
 
 if __name__ == "__main__":
-    # Kill existing process on our port
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind(("127.0.0.1", PORT))
-        s.close()
-    except OSError:
-        print(f"Port {PORT} in use, killing...")
+    # Clear log
+    open(LOG, "w").close()
+    # Kill existing
+    try: s=socket.socket(); s.bind(("127.0.0.1",PORT)); s.close()
+    except:
         import subprocess
-        pids = subprocess.run(f"lsof -ti :{PORT}", shell=True, capture_output=True, text=True).stdout.strip()
-        for pid in pids.split("\n"):
-            try: os.kill(int(pid), signal.SIGTERM)
-            except: pass
+        subprocess.run(f"lsof -ti :{PORT} | xargs kill 2>/dev/null", shell=True)
         time.sleep(1)
-
-    print(f"Codex proxy: :{PORT} -> {UPSTREAM}")
-    print(f"Config: base_url = \"http://localhost:{PORT}/v1\"")
-    try:
-        HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
-    except KeyboardInterrupt:
-        print("\nStopped.")
+    log(f"Proxy starting: :{PORT} -> {UPSTREAM_HOST}:{UPSTREAM_PORT}")
+    print(f"Codex proxy: :{PORT} -> {UPSTREAM_HOST}:{UPSTREAM_PORT}")
+    print(f"Logs: {LOG}")
+    try: HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    except KeyboardInterrupt: log("Stopped"); print("\nStopped.")
