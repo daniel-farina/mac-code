@@ -25,7 +25,7 @@ Both run the same `agent.py`. Same slash commands. Same web search. Same shell t
 
 ```bash
 brew install llama.cpp
-pip3 install rich ddgs --break-system-packages
+pip3 install rich ddgs
 
 # Download model
 mkdir -p ~/models
@@ -35,16 +35,19 @@ hf_hub_download('unsloth/Qwen3.5-9B-GGUF',
     'Qwen3.5-9B-Q4_K_M.gguf', local_dir='$HOME/models/')
 "
 
-# Start server
+# Run agent (auto-starts llama-server if not running)
+python3 agent.py
+```
+
+The agent auto-detects and starts the LLM server on first launch. You can also start it manually:
+
+```bash
 llama-server \
     --model ~/models/Qwen3.5-9B-Q4_K_M.gguf \
     --port 8000 --host 127.0.0.1 \
     --flash-attn on --ctx-size 65536 \
     --cache-type-k q4_0 --cache-type-v q4_0 \
     --n-gpu-layers 99 --reasoning off -t 4
-
-# Run agent
-python3 agent.py
 ```
 
 ### Option B: MLX (faster, persistent context)
@@ -92,6 +95,8 @@ The LLM classifies its own intent:
 ```
 "find me videos on my desktop"  → LLM says "shell"  → generates find command → executes
 "who do the lakers play next"   → LLM says "search" → rewrites query → DuckDuckGo → answers
+"create a snake game"           → LLM says "code"   → writes file → opens in browser
+"open gmail and read my emails" → LLM says "code"   → MCP: navigate → read → summarize
 "explain quantum computing"     → LLM says "chat"   → streams directly
 ```
 
@@ -105,17 +110,22 @@ The agent can write, edit, and run code - like Claude Code or Codex, but local:
 
 ```
 "create a tetris game"       → writes tetris.html (complete) → opens in browser
-"add a pause button"         → reads file → rewrites with changes → reopens
-"the score is wrong, fix it" → reads file → edits the bug → runs to verify
+"add a pause button"         → reads file → makes surgical edit → reopens
+"the score is wrong, fix it" → reads file → fixes the bug → auto-verifies syntax
 ```
 
 Features:
-- **FILE:** - creates/overwrites files with complete code
-- **EDIT:** - search-and-replace edits on existing files
-- **READ:** - reads files before editing
-- **RUN:** - executes shell commands (open browser, run scripts, test)
-- **Auto-continue** - if response is truncated mid-code, automatically continues (up to 5 iterations)
-- **Error loop** - if RUN fails, feeds errors back to the LLM to fix
+- **READ:** reads files before editing (auto-triggered)
+- **EDIT:** surgical search-and-replace on existing files (default for modifications)
+- **FILE:** creates new files with complete code
+- **RUN:** executes shell commands (open browser, run scripts, npm install)
+- **Fuzzy matching** - EDIT tolerates whitespace differences, indentation mismatches
+- **Multi-block edits** - multiple EDIT blocks in one response for coordinated changes
+- **Auto-continue** - if response is truncated mid-code, automatically continues
+- **Error loop** - if RUN or EDIT fails, feeds errors back to the LLM to fix
+- **Syntax verification** - auto-checks Python, JS, HTML, Ruby, Go, Rust, Bash after edits
+- **Project-aware** - scans file tree so the model knows what files exist
+- **Sticky intent** - follow-up messages stay in code mode ("now also add X")
 
 All responses stream token-by-token as they're generated.
 
@@ -123,9 +133,39 @@ All responses stream token-by-token as they're generated.
 
 ## MCP Support
 
-Connect the agent to external tools via [Model Context Protocol](https://modelcontextprotocol.io/). Any MCP server works - browser automation, databases, APIs, etc.
+Connect the agent to external tools via [Model Context Protocol](https://modelcontextprotocol.io/). Any stdio-based MCP server works - browser automation, databases, APIs, etc. Uses the same config format as Claude Desktop.
 
-### Setup
+### Quick Start with Open WebMCP (Browser Automation)
+
+[Open WebMCP](https://github.com/daniel-farina/open-web-mcp) is an open-source MCP bridge that lets the agent control any website through Chrome. Navigate pages, read content, fill forms, click buttons, run JavaScript - 23 tools total.
+
+**Architecture:**
+
+```
+mac code (agent.py)
+  | stdio JSON-RPC
+Bridge Server (node bridge.js, port 3852)
+  | WebSocket
+Chrome Extension (content.js in every tab)
+  | DOM access
+Any Website
+```
+
+**Install:**
+
+```bash
+# Clone Open WebMCP
+git clone https://github.com/daniel-farina/open-web-mcp.git
+cd open-web-mcp/server && npm install
+
+# Load Chrome extension
+# 1. Go to chrome://extensions
+# 2. Enable Developer mode
+# 3. Click "Load unpacked" → select the extension/ directory
+# Badge shows "OFF" until bridge connects, then turns green
+```
+
+**Configure mac code to use it:**
 
 Create `~/.mac-code/mcp.json`:
 
@@ -134,13 +174,17 @@ Create `~/.mac-code/mcp.json`:
   "mcpServers": {
     "webmcp": {
       "command": "node",
-      "args": ["/path/to/your/mcp-server/bridge.js"]
+      "args": ["/absolute/path/to/open-web-mcp/server/bridge.js"]
     }
   }
 }
 ```
 
-Same format as Claude Desktop. Servers launch automatically on startup:
+**Start the agent:**
+
+```bash
+python3 agent.py
+```
 
 ```
   connecting to MCP servers...
@@ -150,59 +194,68 @@ Same format as Claude Desktop. Servers launch automatically on startup:
 
 ### How It Works
 
-MCP tools are injected into the coding agent's system prompt. The LLM sees what tools are available and decides when to use them:
+MCP tools are injected into the coding agent's system prompt. The LLM sees all available tools and decides when to use them. It chains calls automatically - navigate, read, click, read again - until the task is done:
 
 ```
 "open gmail and list my emails"
   → MCP: navigate {"url": "https://gmail.com"}
   → MCP: read_page_text {}
-  → LLM summarizes: "Here are your 11 recent emails..."
+  → LLM: "Here are your 11 recent emails..."
 
 "click the first email and read it"
   → MCP: click_element {"text": "AliExpress"}
   → MCP: read_page_text {}
-  → LLM summarizes the email content
+  → LLM: summarizes the email content
+
+"fill out the contact form on this page"
+  → MCP: get_form_fields {}
+  → MCP: fill_input {"selector": "#name", "value": "..."}
+  → MCP: click_element {"text": "Submit"}
 ```
 
-The agent chains MCP calls automatically - navigate, read, click, read again - until the task is done.
+### Open WebMCP Tools (23)
 
-### Browser Automation Example
-
-With [WebMCP](https://github.com/anthropics/webmcp) or similar browser MCP server:
-
-| Tool | What it does |
+| Category | Tools |
 |---|---|
-| `navigate` | Open a URL |
-| `read_page_text` | Get all visible text |
-| `click_element` | Click by CSS selector or text |
-| `fill_input` | Fill form fields |
-| `type_text` | Type with real keyboard events |
-| `screenshot` | Capture the page |
-| `query_selector` | Find elements by CSS |
-| `execute_javascript` | Run JS on the page |
+| **Navigation** | `navigate`, `get_active_tab`, `list_tabs`, `open_tab`, `close_tab`, `switch_tab` |
+| **Reading** | `read_page_text`, `read_page_html`, `query_selector`, `find_by_text`, `get_page_info`, `get_links`, `get_table_data`, `get_form_fields` |
+| **Interaction** | `click_element`, `fill_input`, `type_text`, `select_option`, `hover_element`, `scroll_page` |
+| **Advanced** | `execute_javascript`, `wait_for_element`, `screenshot` |
+
+Features:
+- **Tab management** - controlled tabs group in a red "WebMCP" tab group with visual badges
+- **Smart tab reuse** - agent tracks last-used tab, won't hijack your active window
+- **Multi-instance** - multiple MCP clients can share one extension via proxy mode
+- **Custom port** - configurable via `--port` flag or extension popup (default 3852)
 
 ### Adding More MCP Servers
 
-Any stdio-based MCP server works. Just add it to `~/.mac-code/mcp.json`:
+Any stdio-based MCP server works. Add it to `~/.mac-code/mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "webmcp": {
       "command": "node",
-      "args": ["/path/to/bridge.js"]
-    },
-    "database": {
-      "command": "python3",
-      "args": ["/path/to/db-mcp-server.py"]
+      "args": ["/path/to/open-web-mcp/server/bridge.js"]
     },
     "github": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"]
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+    },
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydb"]
     }
   }
 }
 ```
+
+The agent discovers tools from all servers at startup and makes them available via `MCP:` markers in the coding agent.
 
 ---
 
@@ -306,11 +359,29 @@ Type `/` to see all commands:
 
 ---
 
+## Configuration
+
+| File | What |
+|---|---|
+| `~/.mac-code/mcp.json` | MCP server connections (same format as Claude Desktop) |
+| `~/.mac-code/history` | Command history (persists across sessions) |
+| `~/.mac-code/logs/` | Interaction logs for self-improvement |
+| `~/models/` | GGUF model files |
+
+Environment variables:
+
+| Variable | Default | What |
+|---|---|---|
+| `LLAMA_URL` | `http://localhost:8000` | LLM server URL |
+| `MAC_CODE_MAX_ITER` | `100` | Max coding agent iterations per turn |
+
+---
+
 ## Files
 
 | File | What |
 |---|---|
-| `agent.py` | CLI agent — coding, MCP, search, shell, chat |
+| `agent.py` | CLI agent - coding, MCP, search, shell, chat |
 | `chat.py` | Streaming chat |
 | `dashboard.py` | Server monitor |
 | `web/` | Retro Mac web UI |
@@ -345,11 +416,12 @@ This project builds on:
 
 ## Credits
 
-- **[Qwen3.5](https://huggingface.co/Qwen)** — the models
-- **[llama.cpp](https://github.com/ggergov/llama.cpp)** — inference engine
-- **[Unsloth](https://huggingface.co/unsloth)** — GGUF quantizations
-- **[Cloudflare R2](https://developers.cloudflare.com/r2/)** — free object storage
-- **[Rich](https://github.com/Textualize/rich)** — terminal UI
+- **[Qwen3.5](https://huggingface.co/Qwen)** - the models
+- **[llama.cpp](https://github.com/ggergov/llama.cpp)** - inference engine
+- **[Unsloth](https://huggingface.co/unsloth)** - GGUF quantizations
+- **[Open WebMCP](https://github.com/daniel-farina/open-web-mcp)** - browser automation via MCP
+- **[Cloudflare R2](https://developers.cloudflare.com/r2/)** - free object storage
+- **[Rich](https://github.com/Textualize/rich)** - terminal UI
 
 ## License
 
