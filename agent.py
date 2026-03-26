@@ -1202,6 +1202,13 @@ def execute_code_op(op, work_dir):
             path = os.path.join(work_dir, path)
         path = os.path.expanduser(path)
         try:
+            # If file doesn't exist, auto-convert EDIT to FILE (create with replace content)
+            if not os.path.exists(path):
+                dname = os.path.dirname(os.path.abspath(path))
+                os.makedirs(dname, exist_ok=True)
+                with open(path, "w") as f:
+                    f.write(op["replace"])
+                return {"type": "file_write", "path": path, "bytes": len(op["replace"]), "note": "auto-created from EDIT (file did not exist)"}
             with open(path, "r") as f:
                 content = f.read()
 
