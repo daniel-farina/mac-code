@@ -1175,9 +1175,11 @@ Rules:
 - For NEW files: use FILE with complete working code. No placeholders or TODOs.
 - For web apps: FILE to create, then RUN: open file.html
 - For Vite/npm projects: Use scaffold commands instead of writing files manually:
-  RUN: npm create vite@latest myapp -- --template vanilla
+  RUN: yes | npm create vite@latest myapp -- --template vanilla
   RUN: cd myapp && npm install
-  Then EDIT the generated files to customize. This is faster and more reliable than writing package.json by hand.
+  Then EDIT the generated files to customize. IMPORTANT: always pipe yes or use --yes to avoid interactive prompts that hang.
+- When the user says "turn this into X" or "make it do Y", modify the EXISTING project - do NOT create a new one.
+- When the user says "fix it", READ the error output, diagnose the root cause, and try a DIFFERENT approach.
 - After starting a dev server, tell the user the URL (http://localhost:PORT).
 - For Python: FILE to create, then RUN: python3 file.py
 - If too long for one response, end with CONTINUE.
@@ -1452,10 +1454,15 @@ def execute_code_op(op, work_dir):
     elif op["op"] == "run":
         cmd = op["cmd"]
         # Auto-detect dev servers and long-running processes -> background them
-        bg_patterns = ['npm run dev', 'npm start', 'npx vite', 'python3 -m http.server',
+        bg_patterns = ['npm run dev', 'npm start', 'npx vite --', 'npx vite\n', 'python3 -m http.server',
                        'python -m http.server', 'node server', 'live-server', 'npx serve',
                        'flask run', 'uvicorn', 'next dev', 'yarn dev', 'bun dev']
+        # These look similar but are NOT servers - they're one-time commands
+        not_server = ['npm create', 'npm init', 'npm install', 'npm ci', 'npm build',
+                      'npm test', 'npm run build', 'npx create-', 'npm exec']
         is_server = any(p in cmd for p in bg_patterns) or cmd.strip().endswith('&')
+        if any(p in cmd for p in not_server):
+            is_server = False
         cmd_clean = cmd.rstrip('& ')
 
         if is_server:
@@ -1501,8 +1508,10 @@ def execute_code_op(op, work_dir):
             return {"type": "run", "cmd": cmd, "output": "", "error": "Failed to start background job"}
 
         try:
+            # Longer timeout for install/create commands
+            timeout = 300 if any(k in cmd_clean for k in ['npm create', 'npm install', 'npm init', 'npx create', 'pip install']) else 120
             result = sp.run(cmd_clean, shell=True, capture_output=True, text=True,
-                          timeout=120, cwd=work_dir)
+                          timeout=timeout, cwd=work_dir)
             output = result.stdout[:3000] if result.stdout else ""
             error = result.stderr[:1000] if result.returncode != 0 and result.stderr else ""
             return {"type": "run", "cmd": cmd, "output": output, "error": error, "code": result.returncode}
