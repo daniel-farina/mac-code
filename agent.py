@@ -19,6 +19,7 @@ from rich.padding import Padding
 from rich.columns import Columns
 
 SERVER = os.environ.get("LLAMA_URL", "http://localhost:8000")
+MAX_ITERATIONS = int(os.environ.get("MAC_CODE_MAX_ITER", "100"))
 
 # ── Self-improvement: failure logging ─────────────
 LOGS_DIR = Path.home() / ".mac-code" / "logs"
@@ -1146,13 +1147,57 @@ def execute_code_op(op, work_dir):
         try:
             with open(path, "r") as f:
                 content = f.read()
+
+            # Try exact match first
             if op["search"] in content:
                 content = content.replace(op["search"], op["replace"], 1)
                 with open(path, "w") as f:
                     f.write(content)
                 return {"type": "file_edit", "path": path}
-            else:
-                return {"type": "file_edit", "path": path, "error": f"Search text not found in {os.path.basename(path)}"}
+
+            # Fallback: normalize whitespace and try again
+            # Strip trailing whitespace from each line in both search and content
+            def normalize(text):
+                return "\n".join(line.rstrip() for line in text.split("\n"))
+
+            norm_content = normalize(content)
+            norm_search = normalize(op["search"])
+
+            if norm_search in norm_content:
+                # Find the exact position in the original content
+                # by matching line-by-line
+                search_lines = op["search"].split("\n")
+                content_lines = content.split("\n")
+                for i in range(len(content_lines) - len(search_lines) + 1):
+                    chunk = content_lines[i:i + len(search_lines)]
+                    if normalize("\n".join(chunk)) == norm_search:
+                        # Replace these lines
+                        new_lines = content_lines[:i] + op["replace"].split("\n") + content_lines[i + len(search_lines):]
+                        with open(path, "w") as f:
+                            f.write("\n".join(new_lines))
+                        return {"type": "file_edit", "path": path, "note": "fuzzy whitespace match"}
+
+            # Fallback 2: try matching just the stripped key lines (first and last non-empty)
+            search_stripped = [l.strip() for l in op["search"].split("\n") if l.strip()]
+            if len(search_stripped) >= 2:
+                content_lines = content.split("\n")
+                first_key = search_stripped[0]
+                last_key = search_stripped[-1]
+                for i in range(len(content_lines)):
+                    if content_lines[i].strip() == first_key:
+                        # Scan forward for last key
+                        for j in range(i + 1, min(i + len(search_stripped) + 5, len(content_lines))):
+                            if content_lines[j].strip() == last_key:
+                                # Check that enough middle lines match
+                                chunk_stripped = [l.strip() for l in content_lines[i:j+1] if l.strip()]
+                                if len(set(search_stripped) & set(chunk_stripped)) >= len(search_stripped) * 0.7:
+                                    new_lines = content_lines[:i] + op["replace"].split("\n") + content_lines[j+1:]
+                                    with open(path, "w") as f:
+                                        f.write("\n".join(new_lines))
+                                    return {"type": "file_edit", "path": path, "note": "fuzzy line match"}
+                                break
+
+            return {"type": "file_edit", "path": path, "error": f"Search text not found in {os.path.basename(path)}"}
         except FileNotFoundError:
             return {"type": "file_edit", "path": path, "error": f"File not found: {path}"}
 
@@ -1827,6 +1872,11 @@ def main():
             cls_thread.join(timeout=1)
             intent = intent_result[0] or "chat"
 
+            # Sticky intent: if last turn was code, short follow-ups stay in code mode
+            # ("fix it", "but it's still small", "now add X", "continue", etc.)
+            if last_interaction and last_interaction.get("intent") == "code" and intent != "search":
+                intent = "code"
+
             # Route based on LLM classification
             if intent == "shell":
                 # Phase 1: Generate command + execute (with spinner)
@@ -1971,14 +2021,14 @@ def main():
                 code_msgs = [
                     {"role": "system", "content": f"Today is {today}. Working directory: {work_dir}\n\n{CODE_SYSTEM}{get_mcp_tool_descriptions()}"},
                 ]
-                for msg in messages[-6:]:
+                for msg in messages[-20:]:
                     code_msgs.append(msg)
                 code_msgs.append({"role": "user", "content": user_input})
 
                 total_tokens = 0
                 full_response = ""
 
-                for iteration in range(8):
+                for iteration in range(MAX_ITERATIONS):
                     # Stream LLM response
                     console.print("  ", end="")
                     chunk_response = ""
@@ -2062,11 +2112,11 @@ def main():
 
                         code_msgs.append({"role": "assistant", "content": chunk_response})
                         code_msgs.append({"role": "user", "content": "\n\n".join(feedback) if feedback else "Continue."})
-                        console.print(f"  [dim]iterating... ({iteration + 2}/8)[/]\n")
+                        console.print(f"  [dim]iterating... ({iteration + 2})[/]\n")
 
                     elif truncated:
                         # Response was cut off mid-code-block but no complete ops parsed
-                        console.print(f"  [dim]response truncated, continuing... ({iteration + 2}/8)[/]\n")
+                        console.print(f"  [dim]response truncated, continuing... ({iteration + 2})[/]\n")
                         code_msgs.append({"role": "assistant", "content": chunk_response})
                         code_msgs.append({"role": "user", "content": "Your response was cut off mid-code. Please rewrite the complete file from the beginning using FILE: markers."})
 
