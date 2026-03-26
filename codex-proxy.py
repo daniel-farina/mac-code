@@ -6,13 +6,13 @@ for llama.cpp compatibility. Supports streaming (SSE) passthrough.
 Usage: python3 codex-proxy.py  (listens on :8001, forwards to :8000)
 """
 
-import json, sys, http.client
+import json, sys, os, http.client
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 UPSTREAM_HOST = "localhost"
-UPSTREAM_PORT = 8000
-PORT = 8001
+UPSTREAM_PORT = int(os.environ.get("UPSTREAM_PORT", "8080"))
+PORT = int(os.environ.get("PROXY_PORT", "8001"))
 
 class ProxyHandler(BaseHTTPRequestHandler):
     def do_POST(self):
