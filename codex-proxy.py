@@ -101,6 +101,29 @@ class ProxyHandler(BaseHTTPRequestHandler):
         print(f"[proxy] {args[0]}", file=sys.stderr)
 
 if __name__ == "__main__":
+    import signal, socket
+    # Kill any existing process on our port
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", PORT))
+        s.close()
+    except OSError:
+        print(f"Port {PORT} in use, killing existing process...")
+        import subprocess
+        pids = subprocess.run(f"lsof -ti :{PORT}", shell=True, capture_output=True, text=True).stdout.strip()
+        if pids:
+            for pid in pids.split("\n"):
+                try:
+                    os.kill(int(pid), signal.SIGTERM)
+                except Exception:
+                    pass
+            import time; time.sleep(1)
+
+    server = HTTPServer(("127.0.0.1", PORT), ProxyHandler)
     print(f"Codex proxy: :{PORT} -> {UPSTREAM_HOST}:{UPSTREAM_PORT}")
     print(f"Set in ~/.codex/config.toml: base_url = \"http://localhost:{PORT}/v1\"")
-    HTTPServer(("127.0.0.1", PORT), ProxyHandler).serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nProxy stopped.")
+        server.server_close()
