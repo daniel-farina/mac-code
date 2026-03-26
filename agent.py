@@ -104,14 +104,17 @@ TOOL_KEYWORDS = [
 
 def classify_intent(message):
     """Ask LLM to classify: 'search', 'shell', 'code', or 'chat'. One fast call (~1s)."""
+    mcp_hint = ""
+    if mcp_clients:
+        mcp_hint = " Also use code for browser automation (get tab info, read page text, click elements, navigate browser, fill forms, take screenshot, interact with web pages)."
     try:
         result, _ = llm_call([
-            {"role": "system", "content": """Classify the user's request into exactly one category. Reply with ONLY the category word, nothing else.
+            {"role": "system", "content": f"""Classify the user's request into exactly one category. Reply with ONLY the category word, nothing else.
 
 Categories:
 - search: needs web search (news, scores, weather, prices, current events, looking up info online)
 - shell: needs simple filesystem info or commands (find files, list directories, check disk space, quick one-line commands)
-- code: needs to write, create, edit, or fix code/programs/files (build a game, create an app, write a script, make a website, edit code, fix a bug, add a feature, refactor code, finish/continue code, generate any program)
+- code: needs to write, create, edit, or fix code/programs/files (build a game, create an app, write a script, make a website, edit code, fix a bug, add a feature, refactor code, finish/continue code, generate any program).{mcp_hint}
 - chat: general conversation, reasoning, math, explanations (no file creation needed)
 
 Reply with ONLY one word: search, shell, code, or chat"""},
@@ -704,6 +707,188 @@ def prepare_search(query):
     ]
     return msgs
 
+# ── MCP client ────────────────────────────────────
+
+MCP_CONFIG_PATH = Path.home() / ".mac-code" / "mcp.json"
+
+class MCPClient:
+    """Minimal MCP client - connects to stdio MCP servers via newline-delimited JSON-RPC."""
+
+    def __init__(self, name, command, args, env=None):
+        self.name = name
+        self.tools = []
+        self._id = 0
+        merged_env = os.environ.copy()
+        if env:
+            merged_env.update(env)
+        self.process = subprocess.Popen(
+            [command] + args,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        self._buf = b""
+        self._initialize()
+
+    def _next_id(self):
+        self._id += 1
+        return self._id
+
+    def _send(self, method, params=None, timeout=15):
+        msg = {"jsonrpc": "2.0", "id": self._next_id(), "method": method}
+        if params is not None:
+            msg["params"] = params
+        line = json.dumps(msg) + "\n"
+        self.process.stdin.write(line.encode())
+        self.process.stdin.flush()
+        return self._read_response(msg["id"], timeout=timeout)
+
+    def _send_notification(self, method, params=None):
+        msg = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            msg["params"] = params
+        line = json.dumps(msg) + "\n"
+        self.process.stdin.write(line.encode())
+        self.process.stdin.flush()
+
+    def _read_response(self, expected_id, timeout=15):
+        import select
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            # Check if we already have a complete line in buffer
+            while b"\n" in self._buf:
+                line, self._buf = self._buf.split(b"\n", 1)
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                # Skip notifications (no id field)
+                if "id" not in data:
+                    continue
+                if data.get("id") == expected_id:
+                    return data
+            # Read more data
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([self.process.stdout], [], [], min(remaining, 0.5))
+            if not ready:
+                continue
+            chunk = self.process.stdout.read1(4096) if hasattr(self.process.stdout, 'read1') else self.process.stdout.read(1)
+            if not chunk:
+                return None
+            self._buf += chunk
+        return None
+
+    def _initialize(self):
+        resp = self._send("initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "mac-code", "version": "1.0"}
+        })
+        self._send_notification("notifications/initialized")
+        return resp
+
+    def list_tools(self):
+        resp = self._send("tools/list", timeout=15)
+        if resp and "result" in resp:
+            self.tools = resp["result"].get("tools", [])
+        return self.tools
+
+    def call_tool(self, name, arguments=None):
+        resp = self._send("tools/call", {"name": name, "arguments": arguments or {}})
+        if resp and "result" in resp:
+            result = resp["result"]
+            # Extract text from MCP content array
+            if "content" in result:
+                texts = []
+                for item in result["content"]:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        texts.append(item.get("text", ""))
+                return "\n".join(texts)
+            return json.dumps(result, indent=2)
+        if resp and "error" in resp:
+            return f"Error: {resp['error'].get('message', str(resp['error']))}"
+        return "Error: No response from MCP server"
+
+    def close(self):
+        try:
+            self.process.terminate()
+            self.process.wait(timeout=3)
+        except Exception:
+            self.process.kill()
+
+
+# Global MCP clients
+mcp_clients = {}
+
+def load_mcp_servers():
+    """Load MCP server configs from ~/.mac-code/mcp.json and connect."""
+    global mcp_clients
+    if not MCP_CONFIG_PATH.exists():
+        return
+    try:
+        with open(MCP_CONFIG_PATH) as f:
+            config = json.load(f)
+        servers = config.get("mcpServers", {})
+        for name, cfg in servers.items():
+            command = cfg.get("command", "")
+            args = cfg.get("args", [])
+            env = cfg.get("env")
+            if not command:
+                continue
+            try:
+                client = MCPClient(name, command, args, env)
+                tools = client.list_tools()
+                mcp_clients[name] = client
+                console.print(f"  [bold bright_green]\u2713[/] [bold]{name}[/]  {len(tools)} tools")
+            except Exception as e:
+                console.print(f"  [bold red]\u2717[/] [bold]{name}[/]  {e}")
+    except Exception as e:
+        console.print(f"  [dim]mcp config error: {e}[/]")
+
+def get_mcp_tool_descriptions():
+    """Build tool description string from all connected MCP servers."""
+    if not mcp_clients:
+        return ""
+    lines = ["\nMCP tools (browser & external):"]
+    for server_name, client in mcp_clients.items():
+        for tool in client.tools:
+            name = tool["name"]
+            desc = tool.get("description", "")
+            props = tool.get("inputSchema", {}).get("properties", {})
+            required = tool.get("inputSchema", {}).get("required", [])
+            param_parts = []
+            for pname, pinfo in props.items():
+                req = " (required)" if pname in required else ""
+                pdesc = pinfo.get("description", pinfo.get("type", ""))
+                param_parts.append(f"{pname}: {pdesc}{req}")
+            params = ", ".join(param_parts) if param_parts else "none"
+            lines.append(f"- {name}: {desc} -- params: {params}")
+    lines.append("")
+    lines.append("To call an MCP tool:")
+    lines.append("MCP: tool_name")
+    lines.append('ARGS: {"param": "value"}')
+    lines.append("")
+    lines.append("You will see the tool result, then decide your next action.")
+    return "\n".join(lines)
+
+def call_mcp_tool(tool_name, arguments):
+    """Find and call an MCP tool across all connected servers."""
+    for client in mcp_clients.values():
+        for tool in client.tools:
+            if tool["name"] == tool_name:
+                return client.call_tool(tool_name, arguments)
+    return f"Error: MCP tool '{tool_name}' not found"
+
+def close_mcp_servers():
+    for client in mcp_clients.values():
+        client.close()
+    mcp_clients.clear()
+
+
 # ── coding agent ──────────────────────────────────
 
 CODE_SYSTEM = """You are a coding agent on macOS. You write, edit, and run code directly on the user's computer.
@@ -821,6 +1006,30 @@ def parse_code_ops(text):
             if path:
                 operations.append({"op": "read", "path": path})
 
+        elif line.startswith("MCP:"):
+            tool_name = line[4:].strip().strip("`")
+            i += 1
+            args = {}
+            # Look for ARGS: on next non-blank line
+            while i < len(lines):
+                stripped = lines[i].strip()
+                if stripped.startswith("ARGS:"):
+                    args_str = stripped[5:].strip()
+                    try:
+                        args = json.loads(args_str)
+                    except json.JSONDecodeError:
+                        pass
+                    i += 1
+                    break
+                elif stripped == "":
+                    i += 1
+                    continue
+                else:
+                    break
+            if tool_name:
+                operations.append({"op": "mcp", "tool": tool_name, "args": args})
+            continue
+
         i += 1
 
     return operations
@@ -883,6 +1092,20 @@ def execute_code_op(op, work_dir):
             return {"type": "read", "path": path, "content": content, "lines": content.count("\n") + 1}
         except FileNotFoundError:
             return {"type": "read", "path": path, "content": "", "error": f"File not found: {path}", "lines": 0}
+
+    elif op["op"] == "mcp":
+        tool_name = op["tool"]
+        args = op["args"]
+        try:
+            result_text = call_mcp_tool(tool_name, args)
+            is_error = result_text.startswith("Error:")
+            return {
+                "type": "mcp_call", "tool": tool_name, "args": args,
+                "result": result_text[:5000],
+                "error": result_text if is_error else None,
+            }
+        except Exception as e:
+            return {"type": "mcp_call", "tool": tool_name, "args": args, "result": "", "error": str(e)}
 
     return {"type": "unknown"}
 
@@ -1080,6 +1303,15 @@ def main():
     model_name, model_detail = detect_model()
     console.clear()
     print_banner(model_name, model_detail)
+
+    # Connect to MCP servers
+    if MCP_CONFIG_PATH.exists():
+        console.print("  [dim]connecting to MCP servers...[/]")
+        load_mcp_servers()
+        if mcp_clients:
+            total_tools = sum(len(c.tools) for c in mcp_clients.values())
+            console.print(f"  [dim]{total_tools} MCP tools available[/]")
+        console.print()
 
     messages = []
     session_tokens = 0
@@ -1638,7 +1870,7 @@ def main():
                 # Coding agent — write/edit/run files with auto-continue
                 today = datetime.now().strftime("%A, %B %d, %Y")
                 code_msgs = [
-                    {"role": "system", "content": f"Today is {today}. Working directory: {work_dir}\n\n{CODE_SYSTEM}"},
+                    {"role": "system", "content": f"Today is {today}. Working directory: {work_dir}\n\n{CODE_SYSTEM}{get_mcp_tool_descriptions()}"},
                 ]
                 for msg in messages[-6:]:
                     code_msgs.append(msg)
@@ -1696,14 +1928,22 @@ def main():
                                     console.print(f"  [bold red]\u2717[/] {result['error']}")
                                 else:
                                     console.print(f"  [dim]read {result['path']} ({result['lines']} lines)[/]")
+                            elif result["type"] == "mcp_call":
+                                tool = result.get("tool", "?")
+                                if result.get("error"):
+                                    console.print(f"  [bold red]\u2717[/] mcp:{tool} - {result['error'][:200]}")
+                                else:
+                                    preview = result.get("result", "")[:200]
+                                    console.print(f"  [bold bright_green]\u2713[/] mcp:{tool} ({len(result.get('result',''))} chars)")
 
                         console.print()
 
                         # Check if we need to iterate
                         errors = [r for r in results if r.get("error")]
                         reads = [r for r in results if r["type"] == "read"]
+                        mcp_calls = [r for r in results if r["type"] == "mcp_call"]
 
-                        if not errors and not truncated and not reads:
+                        if not errors and not truncated and not reads and not mcp_calls:
                             break
 
                         # Build feedback for next iteration
@@ -1715,6 +1955,8 @@ def main():
                                 feedback.append(f"Output of `{r['cmd']}`:\n{r['output'][:2000]}")
                             if r["type"] == "read" and r.get("content"):
                                 feedback.append(f"Contents of {r['path']}:\n{r['content'][:4000]}")
+                            if r["type"] == "mcp_call" and r.get("result") and not r.get("error"):
+                                feedback.append(f"Result of MCP tool '{r['tool']}':\n{r['result'][:4000]}")
 
                         if truncated:
                             feedback.append("Your response was cut off. Continue from where you left off.")
@@ -1828,4 +2070,7 @@ def main():
     console.print()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        close_mcp_servers()
