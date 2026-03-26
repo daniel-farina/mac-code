@@ -1032,7 +1032,13 @@ CRITICAL - LOGIC COMPLETENESS:
 - Never add HTML without wiring up the JS. An unconnected button is a bug.
 - After adding interactive features, verify by adding a small EDIT that connects the event: addEventListener, onclick, onchange, etc.
 - If you add a function reference, make sure the function is defined. If you add an event listener, make sure the element exists.
-- Think through the data flow: where does data come from? Where is it stored? How do UI events trigger updates?"""
+- Think through the data flow: where does data come from? Where is it stored? How do UI events trigger updates?
+
+CRITICAL - MULTI-FILE PROJECTS:
+- When JS references a DOM element (getElementById, querySelector), that element MUST exist in the HTML.
+- If you add JS that needs new HTML elements, edit BOTH the JS file AND the HTML file in the same response.
+- READ all related files first (HTML + JS + CSS), then make coordinated EDITs across all files that need changes.
+- Never edit just one file when the change spans multiple files."""
 
 
 def parse_code_ops(text):
@@ -1215,20 +1221,20 @@ def execute_code_op(op, work_dir):
                             f.write("\n".join(new_lines))
                         return {"type": "file_edit", "path": path, "note": "fuzzy whitespace match"}
 
-            # Fallback 2: try matching just the stripped key lines (first and last non-empty)
+            # Fallback 2: try matching stripped key lines (first and last non-empty)
+            # Only for search blocks with 3+ lines to avoid false positives
             search_stripped = [l.strip() for l in op["search"].split("\n") if l.strip()]
-            if len(search_stripped) >= 2:
+            if len(search_stripped) >= 3:
                 content_lines = content.split("\n")
                 first_key = search_stripped[0]
                 last_key = search_stripped[-1]
                 for i in range(len(content_lines)):
                     if content_lines[i].strip() == first_key:
-                        # Scan forward for last key
-                        for j in range(i + 1, min(i + len(search_stripped) + 5, len(content_lines))):
+                        for j in range(i + 1, min(i + len(search_stripped) + 3, len(content_lines))):
                             if content_lines[j].strip() == last_key:
-                                # Check that enough middle lines match
                                 chunk_stripped = [l.strip() for l in content_lines[i:j+1] if l.strip()]
-                                if len(set(search_stripped) & set(chunk_stripped)) >= len(search_stripped) * 0.7:
+                                # Require 90% overlap (was 70% - too loose, caused corruption)
+                                if len(set(search_stripped) & set(chunk_stripped)) >= len(search_stripped) * 0.9:
                                     new_lines = content_lines[:i] + op["replace"].split("\n") + content_lines[j+1:]
                                     with open(path, "w") as f:
                                         f.write("\n".join(new_lines))
