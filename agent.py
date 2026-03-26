@@ -2253,8 +2253,8 @@ def main():
                                         html = _f.read()
                                     import re as _re
                                     # Check getElementById targets exist
-                                    js_ids = set(_re.findall(r'getElementById\([\'"](\w+)[\'"]\)', html))
-                                    html_ids = set(_re.findall(r'id=[\'"](\w+)[\'"]', html))
+                                    js_ids = set(_re.findall(r'getElementById\([\'"]([a-zA-Z0-9_-]+)[\'"]\)', html))
+                                    html_ids = set(_re.findall(r'id=[\'"]([a-zA-Z0-9_-]+)[\'"]', html))
                                     missing = js_ids - html_ids
                                     if missing:
                                         msg = f"DOM mismatch in {os.path.basename(fpath)}: JS calls getElementById for {missing} but these IDs don't exist in the HTML. Add the missing elements."
