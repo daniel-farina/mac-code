@@ -1248,12 +1248,12 @@ def execute_code_op(op, work_dir):
         cmd = op["cmd"]
         try:
             result = sp.run(cmd, shell=True, capture_output=True, text=True,
-                          timeout=30, cwd=work_dir)
+                          timeout=120, cwd=work_dir)
             output = result.stdout[:3000] if result.stdout else ""
             error = result.stderr[:1000] if result.returncode != 0 and result.stderr else ""
             return {"type": "run", "cmd": cmd, "output": output, "error": error, "code": result.returncode}
         except sp.TimeoutExpired:
-            return {"type": "run", "cmd": cmd, "output": "", "error": "Timed out after 30s"}
+            return {"type": "run", "cmd": cmd, "output": "", "error": "Timed out after 120s"}
         except Exception as e:
             return {"type": "run", "cmd": cmd, "output": "", "error": str(e)}
 
