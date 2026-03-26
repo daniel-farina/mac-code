@@ -990,10 +990,11 @@ READ: path/to/file.ext
 EDIT: path/to/file.ext
 <<<SEARCH
 exact text to find
-===
+===REPLACE
 replacement text
 >>>
   Your DEFAULT for all modifications. Use multiple EDIT blocks for multiple changes.
+  The === separator MUST be on its own line between search and replace text.
 
 FILE: path/to/file.ext
 ```
@@ -1012,7 +1013,9 @@ Rules:
 - For web apps: FILE to create, then RUN: open file.html
 - For Python: FILE to create, then RUN: python3 file.py
 - If too long for one response, end with CONTINUE.
-- Keep explanations brief. Focus on code."""
+- Keep explanations brief. Focus on code.
+- For complex changes: make one focused EDIT at a time. You can do more EDITs in subsequent iterations.
+- NEVER output bare code blocks without FILE: or EDIT: markers. All code must use markers."""
 
 
 def parse_code_ops(text):
@@ -1056,33 +1059,51 @@ def parse_code_ops(text):
         elif line.startswith("EDIT:"):
             path = line[5:].strip().strip("`")
             i += 1
-            search_lines = []
-            replace_lines = []
-            phase = None
+            # Collect one or more search/replace blocks under this EDIT:
             while i < len(lines):
                 stripped = lines[i].strip()
                 if stripped.startswith("<<<"):
+                    # Start a new search/replace block
+                    search_lines = []
+                    replace_lines = []
                     phase = "search"
                     i += 1
-                    continue
-                elif stripped == "===":
-                    phase = "replace"
+                    while i < len(lines):
+                        stripped2 = lines[i].strip()
+                        if stripped2.startswith("<<<"):
+                            if phase == "search" and search_lines:
+                                phase = "replace"
+                            else:
+                                phase = "search"
+                                search_lines = []
+                            i += 1
+                            continue
+                        elif stripped2 in ("===", "---", "===REPLACE", "=== REPLACE", "REPLACE:"):
+                            phase = "replace"
+                            i += 1
+                            continue
+                        elif stripped2 == ">>>":
+                            i += 1
+                            break
+                        elif phase == "search":
+                            search_lines.append(lines[i])
+                        elif phase == "replace":
+                            replace_lines.append(lines[i])
+                        i += 1
+                    if search_lines or replace_lines:
+                        operations.append({
+                            "op": "edit", "path": path,
+                            "search": "\n".join(search_lines),
+                            "replace": "\n".join(replace_lines),
+                        })
+                elif stripped.startswith(("EDIT:", "FILE:", "RUN:", "READ:", "MCP:")):
+                    break  # Next operation starts
+                elif stripped == "":
                     i += 1
                     continue
-                elif stripped == ">>>":
+                else:
                     i += 1
-                    break
-                elif phase == "search":
-                    search_lines.append(lines[i])
-                elif phase == "replace":
-                    replace_lines.append(lines[i])
-                i += 1
-            if search_lines or replace_lines:
-                operations.append({
-                    "op": "edit", "path": path,
-                    "search": "\n".join(search_lines),
-                    "replace": "\n".join(replace_lines),
-                })
+                    continue
             continue
 
         elif line.startswith("RUN:"):
