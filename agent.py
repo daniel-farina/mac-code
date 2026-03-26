@@ -2240,11 +2240,12 @@ def main():
                                         lint_errors.append(f"Syntax error in {fpath}: {err}")
                                 except Exception:
                                     pass
-                                # DOM cross-reference: check getElementById calls match actual IDs
+                                # DOM + function reference checks
                                 try:
                                     with open(fpath, "r") as _f:
                                         html = _f.read()
                                     import re as _re
+                                    # Check getElementById targets exist
                                     js_ids = set(_re.findall(r'getElementById\([\'"](\w+)[\'"]\)', html))
                                     html_ids = set(_re.findall(r'id=[\'"](\w+)[\'"]', html))
                                     missing = js_ids - html_ids
@@ -2252,6 +2253,21 @@ def main():
                                         msg = f"DOM mismatch in {os.path.basename(fpath)}: JS calls getElementById for {missing} but these IDs don't exist in the HTML. Add the missing elements."
                                         console.print(f"  [bold yellow]![/] {msg[:200]}")
                                         lint_errors.append(msg)
+                                    # Check function calls match definitions in inline scripts
+                                    scripts = _re.findall(r'<script[^>]*>([\s\S]*?)</script>', html)
+                                    if scripts:
+                                        all_js = "\n".join(scripts)
+                                        defined = set(_re.findall(r'(?:function\s+|(?:const|let|var)\s+)(\w+)', all_js))
+                                        called = set(_re.findall(r'(?<!function\s)(?<!\.)\b(\w+)\s*\(', all_js))
+                                        # Filter out built-ins and common globals
+                                        builtins = {'fetch','console','document','window','setTimeout','setInterval','clearInterval','clearTimeout','parseInt','parseFloat','JSON','Array','Object','Math','Date','Error','Promise','alert','confirm','encodeURIComponent','decodeURIComponent','addEventListener','removeEventListener','querySelector','querySelectorAll','getElementById','createElement','appendChild','forEach','map','filter','reduce','find','push','splice','join','split','trim','replace','match','test','toString','toFixed','toLocaleString','includes','toLowerCase','toUpperCase','sort','reverse','keys','values','entries','from','assign','stringify','parse','log','error','warn','catch','then','finally','resolve','reject','require','Number','String','Boolean','Set','Map','RegExp','isNaN','Infinity','undefined','NaN','Symbol','BigInt','Proxy','Reflect'}
+                                        missing_fns = called - defined - builtins
+                                        # Only report if the function name looks user-defined (not a method)
+                                        missing_fns = {f for f in missing_fns if len(f) > 2 and f[0].islower()}
+                                        if missing_fns:
+                                            msg = f"Possible undefined functions in {os.path.basename(fpath)}: {missing_fns}. Make sure all called functions are defined."
+                                            console.print(f"  [bold yellow]![/] {msg[:200]}")
+                                            lint_errors.append(msg)
                                 except Exception:
                                     pass
                             elif checker:
