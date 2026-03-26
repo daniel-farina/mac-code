@@ -1034,6 +1034,12 @@ CRITICAL - LOGIC COMPLETENESS:
 - If you add a function reference, make sure the function is defined. If you add an event listener, make sure the element exists.
 - Think through the data flow: where does data come from? Where is it stored? How do UI events trigger updates?
 
+CRITICAL - JAVASCRIPT TEMPLATE LITERALS:
+- In template literals, $$ before {variable} shows a literal dollar sign. To show "$70,000", use: '$' + value or put the $ inside the format function, NOT $$
+- WRONG: `$$${price}` (shows $$70000)
+- RIGHT: `$${price.toLocaleString()}` shows $70000 but ONLY if price is a string. Better: '$' + price.toLocaleString()
+- Safest approach: create a formatPrice function that returns '$' + formatted number, then use ${formatPrice(value)} in the template.
+
 CRITICAL - MULTI-FILE PROJECTS:
 - When JS references a DOM element (getElementById, querySelector), that element MUST exist in the HTML.
 - If you add JS that needs new HTML elements, edit BOTH the JS file AND the HTML file in the same response.
