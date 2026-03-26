@@ -1017,6 +1017,13 @@ Rules:
 - For complex changes: make one focused EDIT at a time. You can do more EDITs in subsequent iterations.
 - NEVER output bare code blocks without FILE: or EDIT: markers. All code must use markers.
 
+CRITICAL - CSS LAYOUTS:
+- When asked for a grid layout, ALWAYS add the CSS. Either inline style or a style block.
+- 3-column grid: style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px"
+- 2-column grid: style="display:grid;grid-template-columns:repeat(2,1fr);gap:16px"
+- Responsive: use repeat(auto-fill, minmax(280px, 1fr)) for auto-adapting columns
+- Cards in a row: use display:grid or display:flex on the PARENT container, not on the cards themselves
+
 CRITICAL - SAFE EDITS:
 - When editing inside a <script> block, do NOT include </script> in your replacement unless it was in your search text.
 - Keep EDITs small and focused. Insert new functions BETWEEN existing ones, don't replace entire blocks.
