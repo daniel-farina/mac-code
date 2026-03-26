@@ -1509,7 +1509,13 @@ def execute_code_op(op, work_dir):
 
         try:
             # Longer timeout for install/create commands
-            timeout = 300 if any(k in cmd_clean for k in ['npm create', 'npm install', 'npm init', 'npx create', 'pip install']) else 120
+            is_install = any(k in cmd_clean for k in ['npm create', 'npm install', 'npm init', 'npx create', 'pip install'])
+            timeout = 300 if is_install else 120
+
+            # Show running status
+            short_cmd = cmd_clean[:50] + ("..." if len(cmd_clean) > 50 else "")
+            console.print(f"  [dim]\u2699 running: {short_cmd}[/]", end="\r")
+
             result = sp.run(cmd_clean, shell=True, capture_output=True, text=True,
                           timeout=timeout, cwd=work_dir)
             output = result.stdout[:3000] if result.stdout else ""
@@ -2544,16 +2550,32 @@ def main():
                 consecutive_edit_fails = 0
 
                 for iteration in range(MAX_ITERATIONS):
-                    # Stream LLM response
-                    console.print("  ", end="")
+                    # Show status while waiting for LLM
+                    if iteration == 0:
+                        status_msg = "  [dim]\u2699 thinking...[/]"
+                    else:
+                        status_msg = f"  [dim]\u2699 working... (step {iteration + 1})[/]"
+
+                    # Stream LLM response with status
                     chunk_response = ""
                     chunk_tokens = 0
+                    first_chunk = True
 
                     try:
-                        for chunk in stream_chat(code_msgs, max_tokens=16000, temperature=0.3):
-                            console.print(chunk, end="", highlight=False)
-                            chunk_response += chunk
-                            chunk_tokens += 1
+                        with Live(status_msg, console=console, refresh_per_second=4, transient=True) as status:
+                            for chunk in stream_chat(code_msgs, max_tokens=16000, temperature=0.3):
+                                if first_chunk:
+                                    first_chunk = False
+                                    status.stop()
+                                    console.print("  ", end="")
+                                console.print(chunk, end="", highlight=False)
+                                chunk_response += chunk
+                                chunk_tokens += 1
+                            if first_chunk:
+                                # Non-streaming response (MLX) - show it
+                                status.stop()
+                                if chunk_response:
+                                    console.print(f"  {chunk_response}", end="")
                     except Exception as e:
                         console.print(f"\n  [bold red]{e}[/]")
                         break
