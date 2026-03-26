@@ -95,11 +95,118 @@ The LLM classifies its own intent:
 "explain quantum computing"     → LLM says "chat"   → streams directly
 ```
 
-Three paths. No hardcoded rules. Upgrading the model upgrades every capability.
+Four paths. No hardcoded rules. Upgrading the model upgrades every capability.
 
 ---
 
-## MLX Backend — Persistent Context
+## Coding Agent
+
+The agent can write, edit, and run code - like Claude Code or Codex, but local:
+
+```
+"create a tetris game"       → writes tetris.html (complete) → opens in browser
+"add a pause button"         → reads file → rewrites with changes → reopens
+"the score is wrong, fix it" → reads file → edits the bug → runs to verify
+```
+
+Features:
+- **FILE:** - creates/overwrites files with complete code
+- **EDIT:** - search-and-replace edits on existing files
+- **READ:** - reads files before editing
+- **RUN:** - executes shell commands (open browser, run scripts, test)
+- **Auto-continue** - if response is truncated mid-code, automatically continues (up to 5 iterations)
+- **Error loop** - if RUN fails, feeds errors back to the LLM to fix
+
+All responses stream token-by-token as they're generated.
+
+---
+
+## MCP Support
+
+Connect the agent to external tools via [Model Context Protocol](https://modelcontextprotocol.io/). Any MCP server works - browser automation, databases, APIs, etc.
+
+### Setup
+
+Create `~/.mac-code/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "webmcp": {
+      "command": "node",
+      "args": ["/path/to/your/mcp-server/bridge.js"]
+    }
+  }
+}
+```
+
+Same format as Claude Desktop. Servers launch automatically on startup:
+
+```
+  connecting to MCP servers...
+  ✓ webmcp  23 tools
+  23 MCP tools available
+```
+
+### How It Works
+
+MCP tools are injected into the coding agent's system prompt. The LLM sees what tools are available and decides when to use them:
+
+```
+"open gmail and list my emails"
+  → MCP: navigate {"url": "https://gmail.com"}
+  → MCP: read_page_text {}
+  → LLM summarizes: "Here are your 11 recent emails..."
+
+"click the first email and read it"
+  → MCP: click_element {"text": "AliExpress"}
+  → MCP: read_page_text {}
+  → LLM summarizes the email content
+```
+
+The agent chains MCP calls automatically - navigate, read, click, read again - until the task is done.
+
+### Browser Automation Example
+
+With [WebMCP](https://github.com/anthropics/webmcp) or similar browser MCP server:
+
+| Tool | What it does |
+|---|---|
+| `navigate` | Open a URL |
+| `read_page_text` | Get all visible text |
+| `click_element` | Click by CSS selector or text |
+| `fill_input` | Fill form fields |
+| `type_text` | Type with real keyboard events |
+| `screenshot` | Capture the page |
+| `query_selector` | Find elements by CSS |
+| `execute_javascript` | Run JS on the page |
+
+### Adding More MCP Servers
+
+Any stdio-based MCP server works. Just add it to `~/.mac-code/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "webmcp": {
+      "command": "node",
+      "args": ["/path/to/bridge.js"]
+    },
+    "database": {
+      "command": "python3",
+      "args": ["/path/to/db-mcp-server.py"]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"]
+    }
+  }
+}
+```
+
+---
+
+## MLX Backend - Persistent Context
 
 The MLX backend adds features llama.cpp can't do:
 
@@ -180,7 +287,9 @@ Type `/` to see all commands:
 ```
 ┌──────────────────────────────────────────────────┐
 │  agent.py — LLM-as-Router                        │
-│  search / shell / chat                           │
+│  search / shell / code / chat                    │
+│  + coding agent (FILE/EDIT/RUN/READ)             │
+│  + MCP client (browser, APIs, databases)         │
 ├──────────┬───────────────────────────────────────┤
 │ llama.cpp│  MLX backend                          │
 │ backend  │  + KV cache save/load                 │
@@ -188,6 +297,9 @@ Type `/` to see all commands:
 │          │  + Cloudflare R2 sync                 │
 │          │  + Paged inference (GPU→SSD)          │
 ├──────────┴───────────────────────────────────────┤
+│  MCP servers (stdio JSON-RPC)                    │
+│  browser · github · databases · any MCP server   │
+├──────────────────────────────────────────────────┤
 │  Apple Silicon — Unified Memory + SSD paging     │
 └──────────────────────────────────────────────────┘
 ```
@@ -198,7 +310,7 @@ Type `/` to see all commands:
 
 | File | What |
 |---|---|
-| `agent.py` | CLI agent — works with either backend |
+| `agent.py` | CLI agent — coding, MCP, search, shell, chat |
 | `chat.py` | Streaming chat |
 | `dashboard.py` | Server monitor |
 | `web/` | Retro Mac web UI |

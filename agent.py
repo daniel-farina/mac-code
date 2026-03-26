@@ -4,7 +4,7 @@ mac code — claude code for your Mac
 """
 
 import json, sys, os, time, subprocess, re, threading, queue
-import urllib.request, random
+import urllib.request, random, readline
 from datetime import datetime
 from pathlib import Path
 
@@ -23,6 +23,28 @@ SERVER = os.environ.get("LLAMA_URL", "http://localhost:8000")
 # ── Self-improvement: failure logging ─────────────
 LOGS_DIR = Path.home() / ".mac-code" / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── readline: history + tab completion ────────────
+HISTORY_FILE = Path.home() / ".mac-code" / "history"
+
+def _setup_readline():
+    if "libedit" in (readline.__doc__ or ""):
+        readline.parse_and_bind("bind ^I rl_complete")
+    else:
+        readline.parse_and_bind("tab: complete")
+    readline.set_history_length(1000)
+    try:
+        if HISTORY_FILE.exists():
+            readline.read_history_file(str(HISTORY_FILE))
+    except OSError:
+        pass
+
+def save_readline_history():
+    try:
+        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        readline.write_history_file(str(HISTORY_FILE))
+    except OSError:
+        pass
 
 def log_interaction(query, intent, response, speed, grade=None, error=None):
     """Log every interaction for self-improvement training data."""
@@ -431,6 +453,54 @@ def swap_model(target_key):
             pass
 
     return False, "Server failed to start"
+
+def ensure_server_running():
+    """Check if llama-server is running; if not, auto-start with 9B model."""
+    try:
+        req = urllib.request.Request(f"{SERVER}/health")
+        with urllib.request.urlopen(req, timeout=2) as r:
+            d = json.loads(r.read())
+        if d.get("status") == "ok":
+            return True
+    except Exception:
+        pass
+
+    cfg = MODELS.get("9b")
+    if not cfg or not os.path.exists(cfg["path"]):
+        # Try 35b
+        cfg = MODELS.get("35b")
+        if not cfg or not os.path.exists(cfg["path"]):
+            return False
+
+    console.print(f"  [dim]starting llama-server ({cfg['name']})...[/]")
+    cmd_list = [
+        "llama-server",
+        "--model", cfg["path"],
+        "--port", "8000", "--host", "127.0.0.1",
+        "--ctx-size", str(cfg["ctx"]),
+        "--cache-type-k", "q4_0", "--cache-type-v", "q4_0",
+    ] + cfg["flags"].split()
+
+    try:
+        subprocess.Popen(cmd_list, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        console.print("  [bold red]llama-server not found. Install: brew install llama.cpp[/]")
+        return False
+
+    for _ in range(30):
+        time.sleep(2)
+        try:
+            req = urllib.request.Request(f"{SERVER}/health")
+            with urllib.request.urlopen(req, timeout=2) as r:
+                d = json.loads(r.read())
+            if d.get("status") == "ok":
+                console.print("  [dim]server ready.[/]")
+                return True
+        except Exception:
+            pass
+
+    console.print("  [bold red]server failed to start within 60s[/]")
+    return False
 
 # ── ANSI strip ─────────────────────────────────────
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*m|\r')
@@ -853,7 +923,28 @@ def get_mcp_tool_descriptions():
     """Build tool description string from all connected MCP servers."""
     if not mcp_clients:
         return ""
-    lines = ["\nMCP tools (browser & external):"]
+    lines = ["""
+MCP (browser & external tools):
+You have access to MCP tools that let you control the user's browser and interact with web pages.
+These tools run in the user's actual Chrome browser via an extension.
+
+To call an MCP tool, use:
+MCP: tool_name
+ARGS: {"param": "value"}
+
+You will see the result, then decide your next action. You can chain multiple MCP calls.
+
+HOW TO USE MCP TOOLS EFFECTIVELY:
+1. Start by navigating: use 'navigate' to open a URL, or 'get_active_tab' to see what's already open
+2. Read the page: use 'read_page_text' to see what's on the page, or 'query_selector'/'find_by_text' to find specific elements
+3. Interact: use 'click_element' to click buttons/links, 'fill_input'/'type_text' for forms
+4. Chain calls: after each action, read the page again to see what changed, then decide next step
+5. Be patient: web pages load dynamically - use 'wait_for_element' if needed
+
+Example workflow - reading emails:
+  MCP: navigate -> MCP: read_page_text -> MCP: click_element (on an email) -> MCP: read_page_text (read content)
+
+Available MCP tools:"""]
     for server_name, client in mcp_clients.items():
         for tool in client.tools:
             name = tool["name"]
@@ -867,12 +958,6 @@ def get_mcp_tool_descriptions():
                 param_parts.append(f"{pname}: {pdesc}{req}")
             params = ", ".join(param_parts) if param_parts else "none"
             lines.append(f"- {name}: {desc} -- params: {params}")
-    lines.append("")
-    lines.append("To call an MCP tool:")
-    lines.append("MCP: tool_name")
-    lines.append('ARGS: {"param": "value"}')
-    lines.append("")
-    lines.append("You will see the tool result, then decide your next action.")
     return "\n".join(lines)
 
 def call_mcp_tool(tool_name, arguments):
@@ -893,37 +978,40 @@ def close_mcp_servers():
 
 CODE_SYSTEM = """You are a coding agent on macOS. You write, edit, and run code directly on the user's computer.
 
-Use these exact markers for file operations:
+CRITICAL: To modify an existing file, ALWAYS use READ: then EDIT:. NEVER regenerate an entire file with FILE: just to change a few lines. FILE: is ONLY for brand-new files.
 
-To WRITE a file (create or overwrite):
-FILE: path/to/file.ext
-```
-complete file content here
-```
+Available operations:
 
-To EDIT a specific part of an existing file:
+READ: path/to/file.ext
+  Always read a file before editing it. You need the exact text for EDIT blocks.
+  IMPORTANT: When you READ a file, STOP and wait for the contents. Do NOT guess EDIT text in the same response. Issue READ alone, see the result, then EDIT in the next response.
+
 EDIT: path/to/file.ext
 <<<SEARCH
-exact text to find in the file
+exact text to find
 ===
 replacement text
 >>>
+  Your DEFAULT for all modifications. Use multiple EDIT blocks for multiple changes.
 
-To RUN a shell command:
-RUN: command here
+FILE: path/to/file.ext
+```
+complete content
+```
+  ONLY for creating brand-new files that don't exist yet.
 
-To READ a file before editing it:
-READ: path/to/file.ext
+RUN: command
+  Execute a shell command.
 
 Rules:
-- ALWAYS use FILE: markers when creating files. Do not just show code in markdown.
-- Write COMPLETE working code. No placeholders, no TODO comments, no "..." shortcuts.
-- For web apps: use FILE: to write the HTML file, then RUN: open file.html
-- For Python scripts: use FILE: to write the .py file, then RUN: python3 file.py
-- If code is too long for one response, write as much as you can and end with CONTINUE.
-- When asked to edit or fix existing code, use READ: first, then EDIT: for small changes or FILE: to rewrite.
-- Keep explanations brief. Focus on writing working code.
-- You can create multiple files in one response."""
+- To MODIFY existing code: READ first, then EDIT. Never use FILE to modify.
+- Use multiple EDIT blocks in one response for multiple changes.
+- Keep EDIT search text short (3-8 lines) and unique so it matches reliably.
+- For NEW files: use FILE with complete working code. No placeholders or TODOs.
+- For web apps: FILE to create, then RUN: open file.html
+- For Python: FILE to create, then RUN: python3 file.py
+- If too long for one response, end with CONTINUE.
+- Keep explanations brief. Focus on code."""
 
 
 def parse_code_ops(text):
@@ -1284,6 +1372,14 @@ COMMANDS = [
     ("/quit",        "Exit mac code"),
 ]
 
+def _slash_completer(text, state):
+    """Tab-complete slash commands."""
+    if text.startswith("/"):
+        options = [cmd for cmd, _ in COMMANDS if cmd.startswith(text)]
+    else:
+        options = []
+    return options[state] if state < len(options) else None
+
 def show_slash_menu(filter_text=""):
     """Print slash commands inline — like Claude Code."""
     matches = COMMANDS
@@ -1300,8 +1396,11 @@ def show_slash_menu(filter_text=""):
 
 # ── main ───────────────────────────────────────────
 def main():
-    model_name, model_detail = detect_model()
+    _setup_readline()
+    readline.set_completer(_slash_completer)
     console.clear()
+    ensure_server_running()
+    model_name, model_detail = detect_model()
     print_banner(model_name, model_detail)
 
     # Connect to MCP servers
@@ -1879,7 +1978,7 @@ def main():
                 total_tokens = 0
                 full_response = ""
 
-                for iteration in range(5):
+                for iteration in range(8):
                     # Stream LLM response
                     console.print("  ", end="")
                     chunk_response = ""
@@ -1954,7 +2053,7 @@ def main():
                             if r["type"] == "run" and r.get("output"):
                                 feedback.append(f"Output of `{r['cmd']}`:\n{r['output'][:2000]}")
                             if r["type"] == "read" and r.get("content"):
-                                feedback.append(f"Contents of {r['path']}:\n{r['content'][:4000]}")
+                                feedback.append(f"Contents of {r['path']}:\n{r['content'][:10000]}")
                             if r["type"] == "mcp_call" and r.get("result") and not r.get("error"):
                                 feedback.append(f"Result of MCP tool '{r['tool']}':\n{r['result'][:4000]}")
 
@@ -1963,11 +2062,11 @@ def main():
 
                         code_msgs.append({"role": "assistant", "content": chunk_response})
                         code_msgs.append({"role": "user", "content": "\n\n".join(feedback) if feedback else "Continue."})
-                        console.print(f"  [dim]iterating... ({iteration + 2}/5)[/]\n")
+                        console.print(f"  [dim]iterating... ({iteration + 2}/8)[/]\n")
 
                     elif truncated:
                         # Response was cut off mid-code-block but no complete ops parsed
-                        console.print(f"  [dim]response truncated, continuing... ({iteration + 2}/5)[/]\n")
+                        console.print(f"  [dim]response truncated, continuing... ({iteration + 2}/8)[/]\n")
                         code_msgs.append({"role": "assistant", "content": chunk_response})
                         code_msgs.append({"role": "user", "content": "Your response was cut off mid-code. Please rewrite the complete file from the beginning using FILE: markers."})
 
@@ -2073,4 +2172,5 @@ if __name__ == "__main__":
     try:
         main()
     finally:
+        save_readline_history()
         close_mcp_servers()
