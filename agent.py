@@ -1249,19 +1249,16 @@ DIFF: path/to/file.ext
 --- a/path/to/file.ext
 +++ b/path/to/file.ext
 @@ -10,3 +10,4 @@
- context line (unchanged, starts with space)
--old line to remove
-+new line to add
-+another new line
+ context line
+-removed line
++added line
++another added line
 ```
-  DEFAULT for all modifications. Uses standard unified diff format.
-  Rules for DIFF:
-  - Lines starting with space are CONTEXT (unchanged, must match the file exactly)
-  - Lines starting with - are REMOVED
-  - Lines starting with + are ADDED
-  - Include 1-3 context lines before and after changes for accurate placement
-  - The @@ header shows line numbers: @@ -oldstart,count +newstart,count @@
-  - You can have multiple @@ hunks in one DIFF block for changes in different parts of the file
+  DEFAULT for all modifications. Standard unified diff format.
+  SPEED TIPS - minimize output tokens:
+  - Use only 1 context line before and after (not 3)
+  - Keep explanations very brief - the diff speaks for itself
+  - Multiple hunks in one DIFF block for multiple changes in the same file
 
 EDIT: path/to/file.ext
 <<<SEARCH
@@ -1972,6 +1969,7 @@ COMMANDS = [
     ("/tools",       "List available agent tools"),
     ("/system",      "Set system prompt — /system <message>"),
     ("/compact",     "Toggle compact output (no markdown rendering)"),
+    ("/verbose",     "Toggle verbose mode (show LLM stream while coding)"),
     ("/ps",          "Show running background jobs (dev servers, builds)"),
     ("/stop",        "Stop a background job or /loop - /stop <id>"),
     ("/logs",        "Show recent output from a background job - /logs <id>"),
@@ -2045,6 +2043,7 @@ def main():
     session_id = f"mc-{int(time.time())}"
     use_agent = True
     compact_mode = False
+    quiet_mode = True  # hide LLM stream, only show operation panels
     auto_route = True  # smart routing between 9B and 35B
     work_dir = os.getcwd()
     branch_save = None
@@ -2295,6 +2294,13 @@ def main():
                 compact_mode = not compact_mode
                 state = "on" if compact_mode else "off"
                 console.print(f"  [dim]compact mode {state}[/]\n")
+                continue
+            elif exact == "/verbose":
+                quiet_mode = not quiet_mode
+                if quiet_mode:
+                    console.print("  [dim]quiet mode - only showing operations[/]\n")
+                else:
+                    console.print("  [dim]verbose mode - showing full LLM output[/]\n")
                 continue
 
             elif exact == "/branch":
@@ -2779,29 +2785,38 @@ def main():
                 for iteration in range(MAX_ITERATIONS):
                     # Show status while waiting for LLM
                     if iteration == 0:
-                        status_msg = "  [dim]\u2699 thinking...[/]"
+                        status_msg = "  [dim]\u2699 coding...[/]"
                     else:
-                        status_msg = f"  [dim]\u2699 working... (step {iteration + 1})[/]"
+                        status_msg = f"  [dim]\u2699 coding... (step {iteration + 1})[/]"
 
-                    # Stream LLM response with status
+                    # Stream LLM response
                     chunk_response = ""
                     chunk_tokens = 0
                     first_chunk = True
 
                     try:
-                        with Live(status_msg, console=console, refresh_per_second=4, transient=True) as status:
-                            for chunk in stream_chat(code_msgs, max_tokens=16000, temperature=0.3):
-                                if first_chunk:
-                                    first_chunk = False
+                        if quiet_mode:
+                            # Quiet: show spinner, collect response silently
+                            with Live(status_msg, console=console, refresh_per_second=4, transient=True) as status:
+                                for chunk in stream_chat(code_msgs, max_tokens=16000, temperature=0.3):
+                                    chunk_response += chunk
+                                    chunk_tokens += 1
+                                    # Update status with token count
+                                    if chunk_tokens % 50 == 0:
+                                        status.update(f"  [dim]\u2699 coding... ({chunk_tokens} tokens)[/]")
+                        else:
+                            # Verbose: stream to terminal
+                            with Live(status_msg, console=console, refresh_per_second=4, transient=True) as status:
+                                for chunk in stream_chat(code_msgs, max_tokens=16000, temperature=0.3):
+                                    if first_chunk:
+                                        first_chunk = False
+                                        status.stop()
+                                        console.print("  ", end="")
+                                    console.print(chunk, end="", highlight=False)
+                                    chunk_response += chunk
+                                    chunk_tokens += 1
+                                if first_chunk and chunk_response:
                                     status.stop()
-                                    console.print("  ", end="")
-                                console.print(chunk, end="", highlight=False)
-                                chunk_response += chunk
-                                chunk_tokens += 1
-                            if first_chunk:
-                                # Non-streaming response (MLX) - show it
-                                status.stop()
-                                if chunk_response:
                                     console.print(f"  {chunk_response}", end="")
                     except Exception as e:
                         console.print(f"\n  [bold red]{e}[/]")
