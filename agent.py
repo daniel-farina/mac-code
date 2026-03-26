@@ -1237,7 +1237,12 @@ def execute_code_op(op, work_dir):
 
             return {"type": "file_edit", "path": path, "error": f"Search text not found in {os.path.basename(path)}"}
         except FileNotFoundError:
-            return {"type": "file_edit", "path": path, "error": f"File not found: {path}"}
+            basename = os.path.basename(path)
+            suggestions = [os.path.relpath(os.path.join(r,f), work_dir)
+                          for r, _, fs in os.walk(work_dir) for f in fs
+                          if basename in f and not r.startswith(os.path.join(work_dir, '.')) and 'node_modules' not in r][:5]
+            hint = f". Did you mean: {', '.join(suggestions)}" if suggestions else ""
+            return {"type": "file_edit", "path": path, "error": f"File not found: {path}{hint}"}
 
     elif op["op"] == "run":
         cmd = op["cmd"]
@@ -1262,7 +1267,21 @@ def execute_code_op(op, work_dir):
                 content = f.read(10000)
             return {"type": "read", "path": path, "content": content, "lines": content.count("\n") + 1}
         except FileNotFoundError:
-            return {"type": "read", "path": path, "content": "", "error": f"File not found: {path}", "lines": 0}
+            # Suggest similar files nearby
+            basename = os.path.basename(path)
+            suggestions = []
+            for root, dirs, files in os.walk(work_dir):
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'node_modules']
+                for f in files:
+                    if basename in f or f.endswith(os.path.splitext(basename)[1]):
+                        rel = os.path.relpath(os.path.join(root, f), work_dir)
+                        suggestions.append(rel)
+                if len(suggestions) >= 10:
+                    break
+            hint = ""
+            if suggestions:
+                hint = f". Did you mean: {', '.join(suggestions[:5])}"
+            return {"type": "read", "path": path, "content": "", "error": f"File not found: {path}{hint}", "lines": 0}
 
     elif op["op"] == "mcp":
         tool_name = op["tool"]
