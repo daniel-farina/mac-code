@@ -1241,7 +1241,18 @@ def execute_code_op(op, work_dir):
                                     return {"type": "file_edit", "path": path, "note": "fuzzy line match"}
                                 break
 
-            return {"type": "file_edit", "path": path, "error": f"Search text not found in {os.path.basename(path)}"}
+            # Show context from the file to help the model correct its search
+            search_first = op["search"].split("\n")[0].strip()
+            context_hint = ""
+            if search_first:
+                for idx, line in enumerate(content.split("\n")):
+                    if search_first[:20] in line or any(w in line for w in search_first.split()[:3] if len(w) > 3):
+                        start = max(0, idx - 1)
+                        end = min(len(content.split("\n")), idx + 4)
+                        snippet = "\n".join(content.split("\n")[start:end])
+                        context_hint = f"\nNearest match around line {idx+1}:\n{snippet}"
+                        break
+            return {"type": "file_edit", "path": path, "error": f"Search text not found in {os.path.basename(path)}{context_hint}"}
         except FileNotFoundError:
             basename = os.path.basename(path)
             suggestions = [os.path.relpath(os.path.join(r,f), work_dir)
@@ -2240,7 +2251,7 @@ def main():
                         feedback = []
                         for r in results:
                             if r.get("error"):
-                                feedback.append(f"Error: {r['error']}")
+                                feedback.append(f"Error: {r['error']}\nUse the exact text shown in 'Nearest match' for your EDIT search block.")
                             if r["type"] == "run" and r.get("output"):
                                 feedback.append(f"Output of `{r['cmd']}`:\n{r['output'][:2000]}")
                             if r["type"] == "read" and r.get("content"):
