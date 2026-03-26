@@ -2075,8 +2075,31 @@ def main():
             elif intent == "code":
                 # Coding agent — write/edit/run files with auto-continue
                 today = datetime.now().strftime("%A, %B %d, %Y")
+
+                # Scan project files so the model knows what exists
+                project_files = []
+                try:
+                    for root, dirs, files in os.walk(work_dir):
+                        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('node_modules', '__pycache__', 'venv', '.venv', 'dist', 'build')]
+                        depth = root.replace(work_dir, '').count(os.sep)
+                        if depth > 3:
+                            dirs.clear()
+                            continue
+                        for f in files:
+                            if not f.startswith('.') and not f.endswith(('.pyc', '.o', '.so', '.dylib')):
+                                rel = os.path.relpath(os.path.join(root, f), work_dir)
+                                sz = os.path.getsize(os.path.join(root, f))
+                                project_files.append(f"  {rel} ({sz}b)")
+                            if len(project_files) >= 50:
+                                break
+                        if len(project_files) >= 50:
+                            break
+                except Exception:
+                    pass
+                file_listing = "\n".join(project_files[:50]) if project_files else "(empty)"
+
                 code_msgs = [
-                    {"role": "system", "content": f"Today is {today}. Working directory: {work_dir}\n\n{CODE_SYSTEM}{get_mcp_tool_descriptions()}"},
+                    {"role": "system", "content": f"Today is {today}. Working directory: {work_dir}\n\nProject files:\n{file_listing}\n\n{CODE_SYSTEM}{get_mcp_tool_descriptions()}"},
                 ]
                 for msg in messages[-20:]:
                     code_msgs.append(msg)
