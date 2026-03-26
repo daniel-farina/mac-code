@@ -1138,6 +1138,100 @@ def close_mcp_servers():
     mcp_clients.clear()
 
 
+# ── unified diff applier ──────────────────────────
+
+def apply_udiff(file_path, patch_text, work_dir="."):
+    """Apply a unified diff patch to a file. Returns (success, old_content, new_content, error)."""
+    if not os.path.isabs(file_path):
+        file_path = os.path.join(work_dir, file_path)
+    file_path = os.path.expanduser(file_path)
+
+    try:
+        with open(file_path, "r") as f:
+            original_lines = f.readlines()
+    except FileNotFoundError:
+        original_lines = []
+
+    old_content = "".join(original_lines)
+    result_lines = list(original_lines)
+    offset = 0  # track line shifts from previous hunks
+
+    # Parse hunks from the diff
+    hunk_re = re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
+    lines = patch_text.split("\n")
+    i = 0
+
+    # Skip header lines (--- and +++)
+    while i < len(lines) and not lines[i].startswith("@@"):
+        i += 1
+
+    while i < len(lines):
+        m = hunk_re.match(lines[i])
+        if not m:
+            i += 1
+            continue
+
+        old_start = int(m.group(1)) - 1  # 0-indexed
+        i += 1
+
+        # Collect hunk lines
+        remove_lines = []
+        add_lines = []
+        context_before = 0
+        in_prefix = True
+
+        while i < len(lines):
+            line = lines[i]
+            if line.startswith("@@") or line.startswith("diff ") or line.startswith("---") or line.startswith("+++"):
+                break
+            if line.startswith("-"):
+                remove_lines.append(line[1:])
+                in_prefix = False
+            elif line.startswith("+"):
+                add_lines.append(line[1:])
+                in_prefix = False
+            elif line.startswith(" ") or line == "":
+                if in_prefix:
+                    context_before += 1
+                if line.startswith(" "):
+                    # Context line - not removed or added
+                    pass
+            i += 1
+
+        # Apply the hunk
+        apply_at = old_start + context_before + offset
+        n_remove = len(remove_lines)
+
+        # Verify the lines match (fuzzy)
+        if n_remove > 0 and apply_at < len(result_lines):
+            expected = [l.rstrip("\n") for l in remove_lines]
+            actual = [l.rstrip("\n") for l in result_lines[apply_at:apply_at + n_remove]]
+            if expected != actual:
+                # Try fuzzy match - strip whitespace
+                exp_stripped = [l.strip() for l in expected]
+                act_stripped = [l.strip() for l in actual]
+                if exp_stripped != act_stripped:
+                    return False, old_content, old_content, f"Hunk failed at line {apply_at + 1}: expected {expected[:2]} but found {actual[:2]}"
+
+        # Replace
+        new_lines_with_newline = [l + "\n" for l in add_lines]
+        result_lines[apply_at:apply_at + n_remove] = new_lines_with_newline
+        offset += len(add_lines) - n_remove
+
+    new_content = "".join(result_lines)
+
+    if new_content == old_content:
+        return False, old_content, old_content, "Patch produced no changes"
+
+    # Write the patched file
+    dname = os.path.dirname(os.path.abspath(file_path))
+    os.makedirs(dname, exist_ok=True)
+    with open(file_path, "w") as f:
+        f.write(new_content)
+
+    return True, old_content, new_content, None
+
+
 # ── coding agent ──────────────────────────────────
 
 CODE_SYSTEM = """You are a coding agent on macOS. You write, edit, and run code directly on the user's computer.
@@ -1156,8 +1250,21 @@ exact text to find
 ===REPLACE
 replacement text
 >>>
-  Your DEFAULT for all modifications. Use multiple EDIT blocks for multiple changes.
-  The === separator MUST be on its own line between search and replace text.
+  Search-and-replace edit. Use multiple EDIT blocks for multiple changes.
+
+DIFF: path/to/file.ext
+```diff
+--- a/path/to/file.ext
++++ b/path/to/file.ext
+@@ -10,3 +10,4 @@
+ context line (unchanged)
+-old line to remove
++new line to add
++another new line
+```
+  PREFERRED for modifications. Uses standard unified diff format.
+  Include 1-2 context lines before/after changes for accurate placement.
+  Lines starting with - are removed, + are added, space are context.
 
 FILE: path/to/file.ext
 ```
@@ -1312,6 +1419,33 @@ def parse_code_ops(text):
                     continue
             continue
 
+        elif line.startswith("DIFF:"):
+            path = line[5:].strip().strip("`")
+            i += 1
+            # Collect the diff content (inside ``` block or raw)
+            diff_lines = []
+            in_block = False
+            while i < len(lines):
+                stripped = lines[i].strip()
+                if stripped.startswith("```") and not in_block:
+                    in_block = True
+                    i += 1
+                    continue
+                elif stripped.startswith("```") and in_block:
+                    i += 1
+                    break
+                elif in_block or stripped.startswith("---") or stripped.startswith("@@") or stripped.startswith("+") or stripped.startswith("-") or stripped.startswith(" "):
+                    diff_lines.append(lines[i])
+                    if not in_block and stripped == "" and diff_lines:
+                        break
+                else:
+                    if diff_lines:
+                        break
+                i += 1
+            if diff_lines:
+                operations.append({"op": "diff", "path": path, "patch": "\n".join(diff_lines)})
+            continue
+
         elif line.startswith("RUN:"):
             cmd = line[4:].strip().strip("`")
             if cmd:
@@ -1454,6 +1588,30 @@ def execute_code_op(op, work_dir):
                           if basename in f and not r.startswith(os.path.join(work_dir, '.')) and 'node_modules' not in r][:5]
             hint = f". Did you mean: {', '.join(suggestions)}" if suggestions else ""
             return {"type": "file_edit", "path": path, "error": f"File not found: {path}{hint}"}
+
+    elif op["op"] == "diff":
+        path = op["path"]
+        patch = op["patch"]
+        success, old_content, new_content, error = apply_udiff(path, patch, work_dir)
+        if success:
+            # Calculate what changed for the diff display
+            old_lines = [l for l in patch.split("\n") if l.startswith("-") and not l.startswith("---")]
+            new_lines = [l for l in patch.split("\n") if l.startswith("+") and not l.startswith("+++")]
+            # Find start line from @@ header
+            start_line = 1
+            for l in patch.split("\n"):
+                m = re.match(r'^@@ -(\d+)', l)
+                if m:
+                    start_line = int(m.group(1))
+                    break
+            return {
+                "type": "file_diff", "path": path if os.path.isabs(path) else os.path.join(work_dir, path),
+                "old": "\n".join(l[1:] for l in old_lines),
+                "new": "\n".join(l[1:] for l in new_lines),
+                "line": start_line,
+            }
+        else:
+            return {"type": "file_diff", "path": path, "error": error or "Patch failed"}
 
     elif op["op"] == "run":
         cmd = op["cmd"]
@@ -2661,7 +2819,7 @@ def main():
 
                             if result["type"] == "file_write":
                                 render_create_panel(result["path"], result["bytes"])
-                            elif result["type"] == "file_edit":
+                            elif result["type"] in ("file_edit", "file_diff"):
                                 if result.get("error"):
                                     console.print(f"  [bold red]\u2717[/] edit failed: {result['error']}")
                                 else:
@@ -2704,7 +2862,7 @@ def main():
 
                         # Auto-lint: ALWAYS check syntax after any file write/edit
                         lint_errors = []
-                        code_files = [r for r in results if r["type"] in ("file_write", "file_edit") and r.get("path") and not r.get("error")]
+                        code_files = [r for r in results if r["type"] in ("file_write", "file_edit", "file_diff") and r.get("path") and not r.get("error")]
                         SYNTAX_CHECKS = {
                             ".py": ["python3", "-m", "py_compile"],
                             ".js": ["node", "--check"],
