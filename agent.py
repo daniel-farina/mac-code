@@ -103,17 +103,18 @@ TOOL_KEYWORDS = [
 ]
 
 def classify_intent(message):
-    """Ask LLM to classify: 'search', 'shell', or 'chat'. One fast call (~1s)."""
+    """Ask LLM to classify: 'search', 'shell', 'code', or 'chat'. One fast call (~1s)."""
     try:
         result, _ = llm_call([
             {"role": "system", "content": """Classify the user's request into exactly one category. Reply with ONLY the category word, nothing else.
 
 Categories:
 - search: needs web search (news, scores, weather, prices, current events, looking up info online)
-- shell: needs filesystem or command execution (find files, list directories, read/write files, run commands, look at desktop, explore folders, check disk space, anything involving the local computer)
-- chat: general conversation, reasoning, math, coding questions, explanations (no tools needed)
+- shell: needs simple filesystem info or commands (find files, list directories, check disk space, quick one-line commands)
+- code: needs to write, create, edit, or fix code/programs/files (build a game, create an app, write a script, make a website, edit code, fix a bug, add a feature, refactor code, finish/continue code, generate any program)
+- chat: general conversation, reasoning, math, explanations (no file creation needed)
 
-Reply with ONLY one word: search, shell, or chat"""},
+Reply with ONLY one word: search, shell, code, or chat"""},
             {"role": "user", "content": message},
         ], max_tokens=5, temperature=0.0)
         return result.strip().lower().split()[0]
@@ -570,7 +571,7 @@ def stream_llm(messages):
     return full, tokens, time.time() - start
 
 def stream_chat(messages, max_tokens=1000, temperature=0.7):
-    """Streaming LLM call for arbitrary messages - yields content chunks."""
+    """Streaming LLM call for arbitrary messages — yields content chunks."""
     payload = json.dumps({
         "model": "local",
         "messages": messages,
@@ -702,6 +703,199 @@ def prepare_search(query):
         {"role": "user", "content": f"Search results:\n\n{context}\n\nQuestion: {query}"},
     ]
     return msgs
+
+# ── coding agent ──────────────────────────────────
+
+CODE_SYSTEM = """You are a coding agent on macOS. You write, edit, and run code directly on the user's computer.
+
+Use these exact markers for file operations:
+
+To WRITE a file (create or overwrite):
+FILE: path/to/file.ext
+```
+complete file content here
+```
+
+To EDIT a specific part of an existing file:
+EDIT: path/to/file.ext
+<<<SEARCH
+exact text to find in the file
+===
+replacement text
+>>>
+
+To RUN a shell command:
+RUN: command here
+
+To READ a file before editing it:
+READ: path/to/file.ext
+
+Rules:
+- ALWAYS use FILE: markers when creating files. Do not just show code in markdown.
+- Write COMPLETE working code. No placeholders, no TODO comments, no "..." shortcuts.
+- For web apps: use FILE: to write the HTML file, then RUN: open file.html
+- For Python scripts: use FILE: to write the .py file, then RUN: python3 file.py
+- If code is too long for one response, write as much as you can and end with CONTINUE.
+- When asked to edit or fix existing code, use READ: first, then EDIT: for small changes or FILE: to rewrite.
+- Keep explanations brief. Focus on writing working code.
+- You can create multiple files in one response."""
+
+
+def parse_code_ops(text):
+    """Parse LLM response for FILE:, EDIT:, RUN:, READ: markers."""
+    operations = []
+    lines = text.split("\n")
+    i = 0
+
+    while i < len(lines):
+        line = lines[i].strip()
+
+        if line.startswith("FILE:"):
+            path = line[5:].strip().strip("`")
+            i += 1
+            content_lines = []
+            in_block = False
+            while i < len(lines):
+                stripped = lines[i].strip()
+                if stripped.startswith("```") and not in_block:
+                    in_block = True
+                    i += 1
+                    continue
+                elif stripped.startswith("```") and in_block:
+                    i += 1
+                    break
+                elif in_block:
+                    content_lines.append(lines[i])
+                    i += 1
+                else:
+                    if stripped == "":
+                        i += 1
+                        continue
+                    break
+            if content_lines:
+                operations.append({
+                    "op": "file", "path": path,
+                    "content": "\n".join(content_lines),
+                })
+            continue
+
+        elif line.startswith("EDIT:"):
+            path = line[5:].strip().strip("`")
+            i += 1
+            search_lines = []
+            replace_lines = []
+            phase = None
+            while i < len(lines):
+                stripped = lines[i].strip()
+                if stripped.startswith("<<<"):
+                    phase = "search"
+                    i += 1
+                    continue
+                elif stripped == "===":
+                    phase = "replace"
+                    i += 1
+                    continue
+                elif stripped == ">>>":
+                    i += 1
+                    break
+                elif phase == "search":
+                    search_lines.append(lines[i])
+                elif phase == "replace":
+                    replace_lines.append(lines[i])
+                i += 1
+            if search_lines or replace_lines:
+                operations.append({
+                    "op": "edit", "path": path,
+                    "search": "\n".join(search_lines),
+                    "replace": "\n".join(replace_lines),
+                })
+            continue
+
+        elif line.startswith("RUN:"):
+            cmd = line[4:].strip().strip("`")
+            if cmd:
+                operations.append({"op": "run", "cmd": cmd})
+
+        elif line.startswith("READ:"):
+            path = line[5:].strip().strip("`")
+            if path:
+                operations.append({"op": "read", "path": path})
+
+        i += 1
+
+    return operations
+
+
+def execute_code_op(op, work_dir):
+    """Execute a single code operation and return result dict."""
+    import subprocess as sp
+
+    if op["op"] == "file":
+        path = op["path"]
+        if not os.path.isabs(path):
+            path = os.path.join(work_dir, path)
+        path = os.path.expanduser(path)
+        dname = os.path.dirname(os.path.abspath(path))
+        os.makedirs(dname, exist_ok=True)
+        with open(path, "w") as f:
+            f.write(op["content"])
+        return {"type": "file_write", "path": path, "bytes": len(op["content"])}
+
+    elif op["op"] == "edit":
+        path = op["path"]
+        if not os.path.isabs(path):
+            path = os.path.join(work_dir, path)
+        path = os.path.expanduser(path)
+        try:
+            with open(path, "r") as f:
+                content = f.read()
+            if op["search"] in content:
+                content = content.replace(op["search"], op["replace"], 1)
+                with open(path, "w") as f:
+                    f.write(content)
+                return {"type": "file_edit", "path": path}
+            else:
+                return {"type": "file_edit", "path": path, "error": f"Search text not found in {os.path.basename(path)}"}
+        except FileNotFoundError:
+            return {"type": "file_edit", "path": path, "error": f"File not found: {path}"}
+
+    elif op["op"] == "run":
+        cmd = op["cmd"]
+        try:
+            result = sp.run(cmd, shell=True, capture_output=True, text=True,
+                          timeout=30, cwd=work_dir)
+            output = result.stdout[:3000] if result.stdout else ""
+            error = result.stderr[:1000] if result.returncode != 0 and result.stderr else ""
+            return {"type": "run", "cmd": cmd, "output": output, "error": error, "code": result.returncode}
+        except sp.TimeoutExpired:
+            return {"type": "run", "cmd": cmd, "output": "", "error": "Timed out after 30s"}
+        except Exception as e:
+            return {"type": "run", "cmd": cmd, "output": "", "error": str(e)}
+
+    elif op["op"] == "read":
+        path = op["path"]
+        if not os.path.isabs(path):
+            path = os.path.join(work_dir, path)
+        path = os.path.expanduser(path)
+        try:
+            with open(path, "r", errors="ignore") as f:
+                content = f.read(10000)
+            return {"type": "read", "path": path, "content": content, "lines": content.count("\n") + 1}
+        except FileNotFoundError:
+            return {"type": "read", "path": path, "content": "", "error": f"File not found: {path}", "lines": 0}
+
+    return {"type": "unknown"}
+
+
+def is_truncated(text):
+    """Check if response was truncated mid-code-block."""
+    fences = text.count("```")
+    if fences % 2 != 0:
+        return True
+    if text.rstrip().upper().endswith("CONTINUE"):
+        return True
+    return False
+
 
 # ── picoclaw agent call with LIVE log streaming ───
 def picoclaw_call_live(message, session="mac-code"):
@@ -1440,6 +1634,114 @@ def main():
                     session_time += elapsed
                     session_turns += 1
                     messages.append({"role": "assistant", "content": full})
+            elif intent == "code":
+                # Coding agent — write/edit/run files with auto-continue
+                today = datetime.now().strftime("%A, %B %d, %Y")
+                code_msgs = [
+                    {"role": "system", "content": f"Today is {today}. Working directory: {work_dir}\n\n{CODE_SYSTEM}"},
+                ]
+                for msg in messages[-6:]:
+                    code_msgs.append(msg)
+                code_msgs.append({"role": "user", "content": user_input})
+
+                total_tokens = 0
+                full_response = ""
+
+                for iteration in range(5):
+                    # Stream LLM response
+                    console.print("  ", end="")
+                    chunk_response = ""
+                    chunk_tokens = 0
+
+                    try:
+                        for chunk in stream_chat(code_msgs, max_tokens=8000, temperature=0.3):
+                            console.print(chunk, end="", highlight=False)
+                            chunk_response += chunk
+                            chunk_tokens += 1
+                    except Exception as e:
+                        console.print(f"\n  [bold red]{e}[/]")
+                        break
+
+                    console.print("\n")
+                    full_response += chunk_response
+                    total_tokens += chunk_tokens
+
+                    # Parse and execute file operations
+                    ops = parse_code_ops(chunk_response)
+                    truncated = is_truncated(chunk_response)
+
+                    if ops:
+                        console.print()
+                        results = []
+                        for op in ops:
+                            result = execute_code_op(op, work_dir)
+                            results.append(result)
+
+                            if result["type"] == "file_write":
+                                console.print(f"  [bold bright_green]\u2713[/] wrote {result['path']} ({result['bytes']} bytes)")
+                            elif result["type"] == "file_edit":
+                                if result.get("error"):
+                                    console.print(f"  [bold red]\u2717[/] edit failed: {result['error']}")
+                                else:
+                                    console.print(f"  [bold bright_green]\u2713[/] edited {result['path']}")
+                            elif result["type"] == "run":
+                                console.print(f"  [dim]$ {result['cmd']}[/]")
+                                if result.get("output"):
+                                    for line in result["output"].split("\n")[:15]:
+                                        console.print(f"    {line}")
+                                if result.get("error"):
+                                    console.print(f"  [bold red]{result['error'][:500]}[/]")
+                            elif result["type"] == "read":
+                                if result.get("error"):
+                                    console.print(f"  [bold red]\u2717[/] {result['error']}")
+                                else:
+                                    console.print(f"  [dim]read {result['path']} ({result['lines']} lines)[/]")
+
+                        console.print()
+
+                        # Check if we need to iterate
+                        errors = [r for r in results if r.get("error")]
+                        reads = [r for r in results if r["type"] == "read"]
+
+                        if not errors and not truncated and not reads:
+                            break
+
+                        # Build feedback for next iteration
+                        feedback = []
+                        for r in results:
+                            if r.get("error"):
+                                feedback.append(f"Error: {r['error']}")
+                            if r["type"] == "run" and r.get("output"):
+                                feedback.append(f"Output of `{r['cmd']}`:\n{r['output'][:2000]}")
+                            if r["type"] == "read" and r.get("content"):
+                                feedback.append(f"Contents of {r['path']}:\n{r['content'][:4000]}")
+
+                        if truncated:
+                            feedback.append("Your response was cut off. Continue from where you left off.")
+
+                        code_msgs.append({"role": "assistant", "content": chunk_response})
+                        code_msgs.append({"role": "user", "content": "\n\n".join(feedback) if feedback else "Continue."})
+                        console.print(f"  [dim]iterating... ({iteration + 2}/5)[/]\n")
+
+                    elif truncated:
+                        # Response was cut off mid-code-block but no complete ops parsed
+                        console.print(f"  [dim]response truncated, continuing... ({iteration + 2}/5)[/]\n")
+                        code_msgs.append({"role": "assistant", "content": chunk_response})
+                        code_msgs.append({"role": "user", "content": "Your response was cut off mid-code. Please rewrite the complete file from the beginning using FILE: markers."})
+
+                    else:
+                        break
+
+                elapsed = time.time() - start
+                render_speed(total_tokens, elapsed)
+                session_tokens += total_tokens
+                session_time += elapsed
+                session_turns += 1
+                messages.append({"role": "user", "content": user_input})
+                messages.append({"role": "assistant", "content": full_response})
+                speed = total_tokens / max(elapsed, 0.1)
+                last_interaction = {"query": user_input, "intent": "code", "response": full_response, "speed": speed}
+
             else:
                 # Direct LLM streaming (no tools needed)
                 messages.append({"role": "user", "content": user_input})
