@@ -569,6 +569,140 @@ def stream_llm(messages):
 
     return full, tokens, time.time() - start
 
+def stream_chat(messages, max_tokens=1000, temperature=0.7):
+    """Streaming LLM call for arbitrary messages - yields content chunks."""
+    payload = json.dumps({
+        "model": "local",
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": True,
+    }).encode()
+
+    req = urllib.request.Request(
+        f"{SERVER}/v1/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        buf = ""
+        while True:
+            ch = resp.read(1)
+            if not ch:
+                break
+            buf += ch.decode("utf-8", errors="replace")
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                line = line.strip()
+                if not line or not line.startswith("data: "):
+                    continue
+                raw = line[6:]
+                if raw == "[DONE]":
+                    return
+                try:
+                    obj = json.loads(raw)
+                    delta = obj["choices"][0].get("delta", {})
+                    c = delta.get("content", "")
+                    if c:
+                        yield c
+                except Exception:
+                    pass
+
+def prepare_shell(query, work_dir="."):
+    """Generate and execute a shell command. Returns (cmd, summary_messages)."""
+    import subprocess as sp
+    cmd = generate_shell_command(query, work_dir)
+
+    try:
+        result = sp.run(cmd, shell=True, capture_output=True, text=True,
+                       timeout=30, cwd=work_dir)
+        output = result.stdout[:8000]
+        if result.stderr:
+            output += f"\n{result.stderr[:2000]}"
+    except sp.TimeoutExpired:
+        output = "Command timed out after 30 seconds"
+    except Exception as e:
+        output = f"Error: {e}"
+
+    today = datetime.now().strftime("%A, %B %d, %Y")
+    msgs = [
+        {"role": "system", "content": f"Today is {today}. You ran a shell command and got results. Present the results clearly to the user. If it's a file listing, format it nicely. If it's code, use formatting. Be helpful and concise."},
+        {"role": "user", "content": f"Command: {cmd}\nOutput:\n{output}\n\nOriginal question: {query}"},
+    ]
+    return cmd, msgs
+
+def prepare_search(query):
+    """Rewrite query and search DuckDuckGo. Returns summary_messages or None."""
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        try:
+            from duckduckgo_search import DDGS
+        except ImportError:
+            return None
+
+    today = datetime.now().strftime("%A, %B %d, %Y")
+
+    try:
+        search_query, _ = llm_call([
+            {"role": "system", "content": f"Today is {today}. Rewrite the user's question into an optimal web search query that will find current, specific data (not articles about announcements). Include 'today' or 'tonight' and the full date for time-sensitive queries. Add words like 'scores', 'results', 'live', or 'now' when looking for current data. Output ONLY the search query string, nothing else."},
+            {"role": "user", "content": query},
+        ], max_tokens=30, temperature=0.0)
+        search_query = search_query.strip().strip('"\'')
+    except Exception:
+        search_query = query
+
+    ddg = DDGS()
+    all_results = []
+    try:
+        all_results.extend(ddg.text(search_query, max_results=15))
+    except Exception:
+        pass
+    try:
+        all_results.extend(ddg.news(search_query, max_results=5))
+    except Exception:
+        pass
+
+    if not all_results:
+        return None
+
+    snippets = "\n".join([f"- {r.get('title','')}: {r.get('body','')}" for r in all_results])
+
+    import re as _re
+    page_content = ""
+    specific_patterns = _re.findall(r'\d{1,2}:\d{2}\s*(?:p\.m\.|a\.m\.|ET|PT)|\$[\d,.]+|\d+-\d+(?:\s*(?:win|loss|final))', snippets.lower())
+    has_specifics = len(specific_patterns) >= 2
+
+    if not has_specifics and all_results:
+        for r in all_results[:3]:
+            url = r.get("href") or r.get("link", "")
+            if not url:
+                continue
+            try:
+                jina_url = f"https://r.jina.ai/{url}"
+                req = urllib.request.Request(jina_url, headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": "text/plain",
+                })
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    text = resp.read(6000).decode("utf-8", errors="ignore")
+                    if len(text) > 200:
+                        page_content = text[:4000]
+                        break
+            except Exception:
+                continue
+
+    context = snippets
+    if page_content:
+        context += f"\n\nDetailed content from top result:\n{page_content}"
+
+    msgs = [
+        {"role": "system", "content": f"Today is {today}. Answer the user's question using the search results below. Be specific, direct, and detailed. Extract dates, times, scores, names, numbers, prices, and facts. Present them clearly."},
+        {"role": "user", "content": f"Search results:\n\n{context}\n\nQuestion: {query}"},
+    ]
+    return msgs
+
 # ── picoclaw agent call with LIVE log streaming ───
 def picoclaw_call_live(message, session="mac-code"):
     """Run picoclaw with real-time log streaming into animated display."""
@@ -1170,72 +1304,76 @@ def main():
 
             # Route based on LLM classification
             if intent == "shell":
-                # File/system operations → LLM generates shell command
+                # Phase 1: Generate command + execute (with spinner)
                 display = WorkingDisplay()
-                display.phase = "running command"
-                tool_result = [None]
+                display.phase = "generating command"
+                prep_result = [None]
 
-                def do_tool():
+                def do_prep_shell():
                     try:
-                        tool_result[0] = run_smart_tool(user_input, work_dir)
-                    except Exception as e:
-                        tool_result[0] = None
+                        prep_result[0] = prepare_shell(user_input, work_dir)
+                    except Exception:
+                        prep_result[0] = None
 
-                tool_thread = threading.Thread(target=do_tool, daemon=True)
-                tool_thread.start()
+                prep_thread = threading.Thread(target=do_prep_shell, daemon=True)
+                prep_thread.start()
 
                 with Live(display.render(), console=console, refresh_per_second=8, transient=True) as live:
-                    while tool_thread.is_alive():
+                    while prep_thread.is_alive():
                         display.frame += 1
                         t = time.time() - start
                         if t < 2:
                             display.phase = "generating command"
-                        elif t < 5:
-                            display.phase = "executing"
                         else:
-                            display.phase = "reading results"
+                            display.phase = "executing"
                         live.update(display.render())
                         time.sleep(0.12)
 
-                tool_thread.join(timeout=1)
-                result = tool_result[0]
-                elapsed = time.time() - start
+                prep_thread.join(timeout=1)
 
-                if result:
-                    response, speed, cmd = result
+                if prep_result[0]:
+                    cmd, summary_msgs = prep_result[0]
                     console.print()
                     console.print(f"  [dim]$ {cmd}[/]")
                     console.print()
-                    render_response(response)
-                    console.print()
-                    s = Text()
-                    s.append(f"  ▸ shell", style="bold bright_cyan")
-                    s.append(f"  {elapsed:.1f}s", style="dim")
-                    if speed > 0:
-                        s.append(f"  ·  {speed:.1f} tok/s", style="bright_green")
-                    console.print(s)
-                    session_tokens += len(response.split())
-                    session_time += elapsed
-                    session_turns += 1
-                    last_interaction = {"query": user_input, "intent": "shell", "response": response, "speed": speed}
-                    messages.append({"role": "user", "content": user_input})
-                    messages.append({"role": "assistant", "content": response})
+
+                    # Phase 2: Stream the summary
+                    full = ""
+                    tokens = 0
+                    console.print("  ", end="")
+                    try:
+                        for chunk in stream_chat(summary_msgs, max_tokens=1000):
+                            console.print(chunk, end="", highlight=False)
+                            full += chunk
+                            tokens += 1
+                        elapsed = time.time() - start
+                        console.print("\n")
+                        render_speed(tokens, elapsed)
+                        session_tokens += tokens
+                        session_time += elapsed
+                        session_turns += 1
+                        speed = tokens / max(elapsed, 0.1)
+                        last_interaction = {"query": user_input, "intent": "shell", "response": full, "speed": speed}
+                        messages.append({"role": "user", "content": user_input})
+                        messages.append({"role": "assistant", "content": full})
+                    except Exception as e:
+                        console.print(f"\n  [bold red]{e}[/]")
                 else:
                     console.print(f"  [bold red]command failed[/]\n")
 
             elif intent == "search":
-                # Web search → fast direct path (~3-5s)
+                # Phase 1: Rewrite query + DuckDuckGo search (with spinner)
                 display = WorkingDisplay()
                 display.phase = "searching the web"
-                search_result = [None]
+                search_prep = [None]
 
-                def do_search():
+                def do_prep_search():
                     try:
-                        search_result[0] = quick_search(user_input)
+                        search_prep[0] = prepare_search(user_input)
                     except Exception:
-                        search_result[0] = None
+                        search_prep[0] = None
 
-                search_thread = threading.Thread(target=do_search, daemon=True)
+                search_thread = threading.Thread(target=do_prep_search, daemon=True)
                 search_thread.start()
 
                 with Live(display.render(), console=console, refresh_per_second=8, transient=True) as live:
@@ -1244,36 +1382,40 @@ def main():
                         t = time.time() - start
                         if t < 2:
                             display.phase = "rewriting query"
-                        elif t < 3:
-                            display.phase = "searching the web"
                         else:
-                            display.phase = "generating answer"
+                            display.phase = "searching the web"
                         live.update(display.render())
                         time.sleep(0.12)
 
                 search_thread.join(timeout=1)
-                result = search_result[0]
-                elapsed = time.time() - start
 
-                if result:
-                    response, speed = result
+                if search_prep[0]:
+                    summary_msgs = search_prep[0]
                     console.print()
-                    render_response(response)
-                    console.print()
-                    s = Text()
-                    s.append(f"  ▸ search", style="bold bright_cyan")
-                    s.append(f"  {elapsed:.1f}s", style="dim")
-                    if speed > 0:
-                        s.append(f"  ·  {speed:.1f} tok/s", style="bright_green")
-                    console.print(s)
-                    session_tokens += len(response.split())
-                    session_time += elapsed
-                    session_turns += 1
-                    messages.append({"role": "user", "content": user_input})
-                    messages.append({"role": "assistant", "content": response})
-                    last_interaction = {"query": user_input, "intent": "search", "response": response, "speed": speed}
+
+                    # Phase 2: Stream the answer
+                    full = ""
+                    tokens = 0
+                    console.print("  ", end="")
+                    try:
+                        for chunk in stream_chat(summary_msgs, max_tokens=1000):
+                            console.print(chunk, end="", highlight=False)
+                            full += chunk
+                            tokens += 1
+                        elapsed = time.time() - start
+                        console.print("\n")
+                        render_speed(tokens, elapsed)
+                        session_tokens += tokens
+                        session_time += elapsed
+                        session_turns += 1
+                        messages.append({"role": "user", "content": user_input})
+                        messages.append({"role": "assistant", "content": full})
+                        speed = tokens / max(elapsed, 0.1)
+                        last_interaction = {"query": user_input, "intent": "search", "response": full, "speed": speed}
+                    except Exception as e:
+                        console.print(f"\n  [bold red]{e}[/]")
                 else:
-                    # Search failed, fall back to direct LLM
+                    # Search failed, fall back to direct LLM streaming
                     console.print("  [dim]search failed, asking model directly...[/]")
                     messages.append({"role": "user", "content": user_input})
                     full = ""
