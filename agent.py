@@ -2136,6 +2136,7 @@ def main():
 
                 total_tokens = 0
                 full_response = ""
+                consecutive_edit_fails = 0
 
                 for iteration in range(MAX_ITERATIONS):
                     # Stream LLM response
@@ -2265,9 +2266,21 @@ def main():
                                         except Exception:
                                             pass
                                         break
+                        edit_fails_this_round = sum(1 for r in results if r.get("type") == "file_edit" and r.get("error"))
+                        if edit_fails_this_round > 0:
+                            consecutive_edit_fails += edit_fails_this_round
+                        else:
+                            consecutive_edit_fails = 0
+
                         for r in results:
                             if r.get("error") and r not in [{"error": e} for e in lint_errors]:
-                                feedback.append(f"Error: {r['error']}\nUse the exact text shown in 'Nearest match' for your EDIT search block.")
+                                if consecutive_edit_fails >= 3:
+                                    # After 3+ failed EDITs, tell the model to use FILE: instead
+                                    fpath = r.get("path", "the file")
+                                    feedback.append(f"EDIT has failed {consecutive_edit_fails} times on {fpath}. STOP using EDIT. Use FILE: to rewrite the entire file instead. READ it first, then FILE: with the complete new content.")
+                                    consecutive_edit_fails = 0  # reset after switching strategy
+                                else:
+                                    feedback.append(f"Error: {r['error']}\nUse the exact text shown in 'Nearest match' for your EDIT search block.")
                             if r["type"] == "run" and r.get("output"):
                                 feedback.append(f"Output of `{r['cmd']}`:\n{r['output'][:2000]}")
                             if r["type"] == "read" and r.get("content"):
