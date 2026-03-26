@@ -2796,14 +2796,16 @@ def main():
 
                     try:
                         if quiet_mode:
-                            # Quiet: show spinner, collect response silently
+                            # Quiet: show spinner with live stats
+                            gen_start = time.time()
                             with Live(status_msg, console=console, refresh_per_second=4, transient=True) as status:
                                 for chunk in stream_chat(code_msgs, max_tokens=16000, temperature=0.3):
                                     chunk_response += chunk
                                     chunk_tokens += 1
-                                    # Update status with token count
-                                    if chunk_tokens % 50 == 0:
-                                        status.update(f"  [dim]\u2699 coding... ({chunk_tokens} tokens)[/]")
+                                    if chunk_tokens % 10 == 0:
+                                        elapsed = time.time() - gen_start
+                                        tps = chunk_tokens / max(elapsed, 0.1)
+                                        status.update(f"  [dim]\u2699 coding... [bold]{tps:.0f} tok/s[/bold]  {chunk_tokens} tokens  {elapsed:.0f}s[/]")
                         else:
                             # Verbose: stream to terminal
                             with Live(status_msg, console=console, refresh_per_second=4, transient=True) as status:
