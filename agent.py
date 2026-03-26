@@ -25,6 +25,105 @@ MAX_ITERATIONS = int(os.environ.get("MAC_CODE_MAX_ITER", "100"))
 LOGS_DIR = Path.home() / ".mac-code" / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
+# ── Background job manager ────────────────────────
+class BackgroundJobs:
+    """Track background processes started by the agent (dev servers, builds, etc)."""
+
+    def __init__(self):
+        self.jobs = {}  # id -> {process, cmd, started, port, status}
+        self._next_id = 0
+
+    def start(self, cmd, cwd="."):
+        """Start a background process. Returns job id."""
+        self._next_id += 1
+        jid = self._next_id
+        try:
+            proc = subprocess.Popen(
+                cmd, shell=True, cwd=cwd,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+            # Try to detect port from command
+            port = None
+            import re as _re
+            port_match = _re.search(r'(?:--port|[-:])\s*(\d{4,5})', cmd)
+            if port_match:
+                port = int(port_match.group(1))
+
+            self.jobs[jid] = {
+                "process": proc,
+                "cmd": cmd,
+                "started": time.time(),
+                "port": port,
+                "pid": proc.pid,
+                "cwd": cwd,
+            }
+            return jid
+        except Exception as e:
+            return None
+
+    def stop(self, jid):
+        """Stop a background job by id."""
+        if jid in self.jobs:
+            job = self.jobs[jid]
+            try:
+                job["process"].terminate()
+                job["process"].wait(timeout=5)
+            except Exception:
+                job["process"].kill()
+            del self.jobs[jid]
+            return True
+        return False
+
+    def stop_all(self):
+        for jid in list(self.jobs.keys()):
+            self.stop(jid)
+
+    def list_jobs(self):
+        """Return list of running jobs."""
+        alive = {}
+        for jid, job in list(self.jobs.items()):
+            if job["process"].poll() is None:
+                alive[jid] = job
+            else:
+                del self.jobs[jid]
+        self.jobs = alive
+        return alive
+
+    def get_output(self, jid, lines=20):
+        """Read recent output from a job (non-blocking)."""
+        if jid not in self.jobs:
+            return None
+        proc = self.jobs[jid]["process"]
+        output = []
+        import select
+        while True:
+            ready, _, _ = select.select([proc.stdout], [], [], 0)
+            if not ready:
+                break
+            line = proc.stdout.readline()
+            if not line:
+                break
+            output.append(line.rstrip())
+            if len(output) >= lines:
+                break
+        return output
+
+    def render_status(self):
+        """Render a one-line status for the prompt."""
+        alive = self.list_jobs()
+        if not alive:
+            return ""
+        parts = []
+        for jid, job in alive.items():
+            elapsed = int(time.time() - job["started"])
+            port_str = f":{job['port']}" if job.get('port') else ""
+            parts.append(f"[{jid}] {job['cmd'][:30]}{port_str} ({elapsed}s)")
+        return " | ".join(parts)
+
+
+bg_jobs = BackgroundJobs()
+
 # ── readline: history + tab completion ────────────
 HISTORY_FILE = Path.home() / ".mac-code" / "history"
 
@@ -1283,13 +1382,43 @@ def execute_code_op(op, work_dir):
 
     elif op["op"] == "run":
         cmd = op["cmd"]
+        # Auto-detect dev servers and long-running processes -> background them
+        bg_patterns = ['npm run dev', 'npm start', 'npx vite', 'python3 -m http.server',
+                       'python -m http.server', 'node server', 'live-server', 'npx serve',
+                       'flask run', 'uvicorn', 'next dev', 'yarn dev', 'bun dev']
+        is_server = any(p in cmd for p in bg_patterns) or cmd.strip().endswith('&')
+        cmd_clean = cmd.rstrip('& ')
+
+        if is_server:
+            jid = bg_jobs.start(cmd_clean, cwd=work_dir)
+            if jid:
+                # Wait a moment for the server to start, then check
+                time.sleep(3)
+                port = bg_jobs.jobs[jid].get("port")
+                alive = bg_jobs.jobs[jid]["process"].poll() is None
+                return {
+                    "type": "run_bg", "cmd": cmd_clean, "job_id": jid,
+                    "port": port, "alive": alive,
+                    "output": f"Started background job [{jid}]" + (f" on port {port}" if port else ""),
+                    "error": "" if alive else "Process exited immediately",
+                }
+            return {"type": "run", "cmd": cmd, "output": "", "error": "Failed to start background job"}
+
         try:
-            result = sp.run(cmd, shell=True, capture_output=True, text=True,
+            result = sp.run(cmd_clean, shell=True, capture_output=True, text=True,
                           timeout=120, cwd=work_dir)
             output = result.stdout[:3000] if result.stdout else ""
             error = result.stderr[:1000] if result.returncode != 0 and result.stderr else ""
             return {"type": "run", "cmd": cmd, "output": output, "error": error, "code": result.returncode}
         except sp.TimeoutExpired:
+            # If it timed out, it might be a server - background it
+            jid = bg_jobs.start(cmd_clean, cwd=work_dir)
+            if jid:
+                return {
+                    "type": "run_bg", "cmd": cmd_clean, "job_id": jid,
+                    "output": f"Command ran for 120s, moved to background job [{jid}]",
+                    "error": "",
+                }
             return {"type": "run", "cmd": cmd, "output": "", "error": "Timed out after 120s"}
         except Exception as e:
             return {"type": "run", "cmd": cmd, "output": "", "error": str(e)}
@@ -1503,7 +1632,10 @@ COMMANDS = [
     ("/tools",       "List available agent tools"),
     ("/system",      "Set system prompt — /system <message>"),
     ("/compact",     "Toggle compact output (no markdown rendering)"),
-    ("/stop",        "Stop a running /loop"),
+    ("/ps",          "Show running background jobs (dev servers, builds)"),
+    ("/stop",        "Stop a background job or /loop - /stop <id>"),
+    ("/logs",        "Show recent output from a background job - /logs <id>"),
+    ("/run",         "Start a background job - /run npm run dev"),
     ("/cost",        "Show estimated cost savings vs cloud APIs"),
     ("/good",        "Grade last response as good (for self-improvement)"),
     ("/bad",         "Grade last response as bad (for self-improvement)"),
@@ -1512,15 +1644,28 @@ COMMANDS = [
 ]
 
 def _slash_completer(text, state):
-    """Tab-complete slash commands."""
+    """Tab-complete slash commands with descriptions shown inline."""
     if text.startswith("/"):
         options = [cmd for cmd, _ in COMMANDS if cmd.startswith(text)]
+        if state == 0 and len(options) > 1:
+            # Show all matching commands with descriptions
+            console.print()
+            for cmd, desc in COMMANDS:
+                if cmd.startswith(text):
+                    console.print(f"  [bold bright_cyan]{cmd:16}[/] [dim]{desc}[/]")
+            console.print()
+            # Re-display the prompt
+            bg_status = bg_jobs.render_status()
+            if bg_status:
+                console.print(f"  [dim]auto[/] [dim cyan]{bg_status}[/]")
+            console.print(f"  [dim]auto[/] [bold bright_yellow]>[/] {text}", end="")
+            return None  # Don't complete yet, let user keep typing
     else:
         options = []
-    return options[state] if state < len(options) else None
+    return (options[state] + " ") if state < len(options) else None
 
 def show_slash_menu(filter_text=""):
-    """Print slash commands inline — like Claude Code."""
+    """Print slash commands inline - like Claude Code."""
     matches = COMMANDS
     if filter_text and filter_text != "/":
         matches = [(c, d) for c, d in COMMANDS if c.startswith(filter_text)]
@@ -1569,6 +1714,9 @@ def main():
         try:
             cur = get_current_model() or "?"
             tag = f"{'auto' if auto_route else 'agent'} {cur}" if use_agent else "raw"
+            bg_status = bg_jobs.render_status()
+            if bg_status:
+                console.print(f"  [dim]{tag}[/] [dim cyan]{bg_status}[/]")
             console.print(f"  [dim]{tag}[/] [bold bright_yellow]>[/] ", end="")
             user_input = input()
         except (EOFError, KeyboardInterrupt):
@@ -1610,6 +1758,73 @@ def main():
                 t.add_row("mode", tag)
                 console.print(t)
                 console.print()
+                continue
+            elif exact == "/ps":
+                jobs = bg_jobs.list_jobs()
+                if not jobs:
+                    console.print("  [dim]no background jobs running[/]\n")
+                else:
+                    t = Table(show_header=True, box=None, padding=(0, 1))
+                    t.add_column("ID", style="bold bright_cyan", width=4)
+                    t.add_column("PID", width=8)
+                    t.add_column("Command")
+                    t.add_column("Port", width=6)
+                    t.add_column("Uptime", width=10)
+                    for jid, job in jobs.items():
+                        elapsed = int(time.time() - job["started"])
+                        mins, secs = divmod(elapsed, 60)
+                        t.add_row(
+                            str(jid), str(job["pid"]),
+                            job["cmd"][:50],
+                            str(job.get("port", "-")),
+                            f"{mins}m{secs}s",
+                        )
+                    console.print(t)
+                    console.print()
+                continue
+            elif exact == "/run":
+                parts = cmd.split(maxsplit=1)
+                if len(parts) < 2:
+                    console.print("  [dim]usage: /run <command>[/]\n")
+                else:
+                    jid = bg_jobs.start(parts[1], cwd=work_dir)
+                    if jid:
+                        time.sleep(2)
+                        port = bg_jobs.jobs[jid].get("port")
+                        console.print(f"  [bold bright_green]\u2713[/] started job [{jid}] pid={bg_jobs.jobs[jid]['pid']}" + (f" port={port}" if port else ""))
+                    else:
+                        console.print("  [bold red]failed to start[/]")
+                    console.print()
+                continue
+            elif exact == "/logs":
+                parts = cmd.split()
+                if len(parts) < 2:
+                    console.print("  [dim]usage: /logs <job_id>[/]\n")
+                else:
+                    try:
+                        jid = int(parts[1])
+                        lines = bg_jobs.get_output(jid)
+                        if lines is None:
+                            console.print(f"  [dim]job {jid} not found[/]")
+                        elif not lines:
+                            console.print(f"  [dim]no new output from job {jid}[/]")
+                        else:
+                            for line in lines:
+                                console.print(f"  {line}")
+                    except ValueError:
+                        console.print("  [dim]usage: /logs <job_id>[/]")
+                    console.print()
+                continue
+            elif exact == "/stop" and len(cmd.split()) >= 2:
+                parts = cmd.split()
+                try:
+                    jid = int(parts[1])
+                    if bg_jobs.stop(jid):
+                        console.print(f"  [dim]stopped job {jid}[/]\n")
+                    else:
+                        console.print(f"  [dim]job {jid} not found[/]\n")
+                except ValueError:
+                    console.print("  [dim]usage: /stop <job_id>[/]\n")
                 continue
             elif exact == "/model":
                 # Check if user passed an argument like "/model 9b"
@@ -2195,8 +2410,12 @@ def main():
                                     console.print(f"  [bold red]\u2717[/] edit failed: {result['error']}")
                                 else:
                                     console.print(f"  [bold bright_green]\u2713[/] edited {result['path']}")
-                            elif result["type"] == "run":
+                            elif result["type"] in ("run", "run_bg"):
                                 console.print(f"  [dim]$ {result['cmd']}[/]")
+                                if result["type"] == "run_bg":
+                                    jid = result.get("job_id", "?")
+                                    port = result.get("port")
+                                    console.print(f"  [bold bright_green]\u2713[/] background job [{jid}]" + (f" on port {port}" if port else ""))
                                 if result.get("output"):
                                     for line in result["output"].split("\n")[:15]:
                                         console.print(f"    {line}")
@@ -2462,4 +2681,5 @@ if __name__ == "__main__":
         main()
     finally:
         save_readline_history()
+        bg_jobs.stop_all()
         close_mcp_servers()
