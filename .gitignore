@@ -9,3 +9,20 @@ picoclaw/
 *.json
 !config.example.json
 /conversations/
+
+# Test apps
+demo01/
+demo02/
+demo03/
+test-app/
+test-vite/
+hello-app/
+hello-vite-app/
+my-app/
+calc.html
+test.py
+snake.html
+tetris.html
+snake-demo/
+pm2-air-quality/
+codex_test/
