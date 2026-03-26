@@ -2201,56 +2201,72 @@ def main():
                         reads = [r for r in results if r["type"] == "read"]
                         mcp_calls = [r for r in results if r["type"] == "mcp_call"]
 
+                        # Auto-lint: ALWAYS check syntax after any file write/edit
+                        lint_errors = []
+                        code_files = [r for r in results if r["type"] in ("file_write", "file_edit") and r.get("path") and not r.get("error")]
+                        SYNTAX_CHECKS = {
+                            ".py": ["python3", "-m", "py_compile"],
+                            ".js": ["node", "--check"],
+                            ".ts": ["npx", "tsc", "--noEmit"],
+                            ".rb": ["ruby", "-c"],
+                            ".go": ["gofmt", "-e"],
+                            ".rs": ["rustfmt", "--check"],
+                            ".sh": ["bash", "-n"],
+                            ".html": None,
+                        }
+                        import subprocess as _sp
+                        for cf in code_files[:5]:
+                            fpath = cf["path"]
+                            ext = os.path.splitext(fpath)[1].lower()
+                            checker = SYNTAX_CHECKS.get(ext)
+                            if checker is None and ext == ".html":
+                                try:
+                                    check = _sp.run(
+                                        ["node", "-e", f"const h=require('fs').readFileSync('{fpath}','utf8');"
+                                         "const m=h.match(/<script[^>]*>([\\s\\S]*?)<\\/script>/g)||[];"
+                                         "m.forEach(s=>{{const c=s.replace(/<\\/?script[^>]*>/g,'');new Function(c)}})"],
+                                        capture_output=True, text=True, timeout=5)
+                                    if check.returncode != 0 and check.stderr:
+                                        err = check.stderr.strip()[:500]
+                                        console.print(f"  [bold yellow]![/] lint: {err[:200]}")
+                                        lint_errors.append(f"Syntax error in {fpath}: {err}")
+                                except Exception:
+                                    pass
+                            elif checker:
+                                try:
+                                    check = _sp.run(checker + [fpath], capture_output=True, text=True, timeout=5)
+                                    if check.returncode != 0:
+                                        err = (check.stderr or check.stdout).strip()[:500]
+                                        console.print(f"  [bold yellow]![/] lint: {err[:200]}")
+                                        lint_errors.append(f"Syntax error in {fpath}: {err}")
+                                except FileNotFoundError:
+                                    pass
+                                except Exception:
+                                    pass
+                        if lint_errors:
+                            errors.extend([{"error": e} for e in lint_errors])
+
                         if not errors and not truncated and not reads and not mcp_calls:
-                            # Auto-verify: syntax check for edited code files
-                            code_files = [r for r in results if r["type"] in ("file_write", "file_edit") and r.get("path")]
-                            SYNTAX_CHECKS = {
-                                ".py": ["python3", "-m", "py_compile"],
-                                ".js": ["node", "--check"],
-                                ".ts": ["npx", "tsc", "--noEmit"],
-                                ".rb": ["ruby", "-c"],
-                                ".go": ["gofmt", "-e"],
-                                ".rs": ["rustfmt", "--check"],
-                                ".sh": ["bash", "-n"],
-                                ".html": None,  # special handling below
-                            }
-                            import subprocess as _sp
-                            for cf in code_files[:5]:
-                                fpath = cf["path"]
-                                ext = os.path.splitext(fpath)[1].lower()
-                                checker = SYNTAX_CHECKS.get(ext)
-                                if checker is None and ext == ".html":
-                                    # Check embedded JS in HTML
-                                    try:
-                                        check = _sp.run(
-                                            ["node", "-e", f"const h=require('fs').readFileSync('{fpath}','utf8');"
-                                             "const m=h.match(/<script[^>]*>([\\s\\S]*?)<\\/script>/g)||[];"
-                                             "m.forEach(s=>{{const c=s.replace(/<\\/?script[^>]*>/g,'');new Function(c)}})"],
-                                            capture_output=True, text=True, timeout=5)
-                                        if check.returncode != 0 and check.stderr:
-                                            err = check.stderr.strip()[:300]
-                                            console.print(f"  [bold yellow]![/] syntax issue: {err[:150]}")
-                                            errors.append({"error": f"Syntax error in {fpath}: {err}"})
-                                    except Exception:
-                                        pass
-                                elif checker:
-                                    try:
-                                        check = _sp.run(checker + [fpath], capture_output=True, text=True, timeout=5)
-                                        if check.returncode != 0:
-                                            err = (check.stderr or check.stdout).strip()[:300]
-                                            console.print(f"  [bold yellow]![/] syntax issue: {err[:150]}")
-                                            errors.append({"error": f"Syntax error in {fpath}: {err}"})
-                                    except FileNotFoundError:
-                                        pass  # checker not installed, skip
-                                    except Exception:
-                                        pass
-                            if not errors:
-                                break
+                            break
 
                         # Build feedback for next iteration
                         feedback = []
+                        # If there are lint errors, auto-read the broken files so the model can fix them
+                        if lint_errors:
+                            for lerr in lint_errors:
+                                feedback.append(f"LINT ERROR (you must fix this): {lerr}")
+                                # Extract file path from error and include its content
+                                for cf in code_files:
+                                    if cf.get("path") and cf["path"] in lerr:
+                                        try:
+                                            with open(cf["path"], "r") as f:
+                                                content = f.read(10000)
+                                            feedback.append(f"Current content of {cf['path']}:\n{content}")
+                                        except Exception:
+                                            pass
+                                        break
                         for r in results:
-                            if r.get("error"):
+                            if r.get("error") and r not in [{"error": e} for e in lint_errors]:
                                 feedback.append(f"Error: {r['error']}\nUse the exact text shown in 'Nearest match' for your EDIT search block.")
                             if r["type"] == "run" and r.get("output"):
                                 feedback.append(f"Output of `{r['cmd']}`:\n{r['output'][:2000]}")
