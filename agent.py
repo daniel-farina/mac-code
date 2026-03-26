@@ -1384,10 +1384,14 @@ def execute_code_op(op, work_dir):
 
             # Try exact match first
             if op["search"] in content:
+                # Find line number of match
+                before_match = content[:content.index(op["search"])]
+                start_line = before_match.count("\n") + 1
                 content = content.replace(op["search"], op["replace"], 1)
                 with open(path, "w") as f:
                     f.write(content)
-                return {"type": "file_edit", "path": path}
+                return {"type": "file_edit", "path": path,
+                        "old": op["search"], "new": op["replace"], "line": start_line}
 
             # Fallback: normalize whitespace and try again
             # Strip trailing whitespace from each line in both search and content
@@ -1684,6 +1688,68 @@ def print_banner(model_name, model_detail):
     console.print("  [dim]type [bold bright_cyan]/[/bold bright_cyan] to see all commands[/]\n")
 
 # ── render helpers ─────────────────────────────────
+def render_diff_panel(path, old_text, new_text, start_line=1):
+    """Render a Claude Code-style diff panel with colored additions/removals."""
+    fname = os.path.basename(path)
+    old_lines = old_text.split("\n") if old_text else []
+    new_lines = new_text.split("\n") if new_text else []
+
+    diff = Text()
+    # Show removed lines (red background)
+    for i, line in enumerate(old_lines):
+        ln = start_line + i
+        diff.append(f" {ln:4d} - ", style="bold red")
+        diff.append(f"{line}\n", style="on #3c1010")
+    # Show added lines (green background)
+    for i, line in enumerate(new_lines):
+        ln = start_line + i
+        diff.append(f" {ln:4d} + ", style="bold green")
+        diff.append(f"{line}\n", style="on #0c3c10")
+
+    removed = len(old_lines)
+    added = len(new_lines)
+    summary = f"Added {added}, removed {removed} lines"
+
+    panel = Panel(
+        diff if diff.plain.strip() else Text("(empty change)"),
+        title=f"[bold bright_cyan]\u25cf Update({fname})[/]",
+        subtitle=f"[dim]{summary}[/]",
+        border_style="bright_cyan",
+        padding=(0, 1),
+    )
+    console.print(panel)
+
+def render_bash_panel(cmd, output="", error=""):
+    """Render a Claude Code-style bash command panel."""
+    short_cmd = cmd[:80] + ("..." if len(cmd) > 80 else "")
+    content = Text()
+    if output:
+        for line in output.split("\n")[:20]:
+            content.append(f"  {line}\n", style="bright_green")
+    if error:
+        for line in error.split("\n")[:10]:
+            content.append(f"  {line}\n", style="bright_red")
+    if not content.plain.strip():
+        content.append("  (no output)", style="dim")
+
+    panel = Panel(
+        content,
+        title=f"[bold bright_yellow]\u25cf Bash[/]([dim]{short_cmd}[/])",
+        border_style="bright_yellow",
+        padding=(0, 1),
+    )
+    console.print(panel)
+
+def render_create_panel(path, size):
+    """Render a file creation panel."""
+    fname = os.path.basename(path)
+    console.print(Panel(
+        f"[bold bright_green]\u2713[/] Created {size:,} bytes",
+        title=f"[bold bright_green]Create({fname})[/]",
+        border_style="bright_green",
+        padding=(0, 1),
+    ))
+
 def render_response(response):
     """Render a response — use Rich Markdown if it has formatting, plain text otherwise."""
     if any(c in response for c in ["##", "**", "```", "| ", "- ", "1. ", "* "]):
@@ -2594,26 +2660,28 @@ def main():
                             results.append(result)
 
                             if result["type"] == "file_write":
-                                console.print(f"  [bold bright_green]\u2713[/] wrote {result['path']} ({result['bytes']} bytes)")
+                                render_create_panel(result["path"], result["bytes"])
                             elif result["type"] == "file_edit":
                                 if result.get("error"):
                                     console.print(f"  [bold red]\u2717[/] edit failed: {result['error']}")
                                 else:
-                                    console.print(f"  [bold bright_green]\u2713[/] edited {result['path']}")
+                                    render_diff_panel(
+                                        result["path"],
+                                        result.get("old", ""),
+                                        result.get("new", ""),
+                                        result.get("line", 1),
+                                    )
                             elif result["type"] in ("run", "run_bg"):
-                                console.print(f"  [dim]$ {result['cmd']}[/]")
                                 if result["type"] == "run_bg":
                                     jid = result.get("job_id", "?")
                                     port = result.get("port")
                                     if result.get("alive"):
-                                        console.print(f"  [bold bright_green]\u2713[/] server running at [bold bright_cyan]http://localhost:{port}[/]  (job [{jid}])")
+                                        render_bash_panel(result["cmd"], result.get("output", ""))
+                                        console.print(f"  [bold bright_green]\u2713[/] server at [bold bright_cyan]http://localhost:{port}[/]  (job [{jid}])")
                                     else:
-                                        console.print(f"  [bold red]\u2717[/] server failed to start")
-                                if result.get("output"):
-                                    for line in result["output"].split("\n")[:15]:
-                                        console.print(f"    {line}")
-                                if result.get("error"):
-                                    console.print(f"  [bold red]{result['error'][:500]}[/]")
+                                        render_bash_panel(result["cmd"], error=result.get("error", "failed"))
+                                else:
+                                    render_bash_panel(result["cmd"], result.get("output", ""), result.get("error", ""))
                             elif result["type"] == "read":
                                 if result.get("error"):
                                     console.print(f"  [bold red]\u2717[/] {result['error']}")
