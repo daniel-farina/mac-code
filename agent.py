@@ -795,7 +795,7 @@ def stream_llm(messages):
     return full, tokens, time.time() - start
 
 def stream_chat(messages, max_tokens=1000, temperature=0.7):
-    """Streaming LLM call for arbitrary messages — yields content chunks."""
+    """Streaming LLM call for arbitrary messages - yields content chunks. Supports both SSE and non-streaming backends (MLX)."""
     payload = json.dumps({
         "model": "local",
         "messages": messages,
@@ -811,6 +811,19 @@ def stream_chat(messages, max_tokens=1000, temperature=0.7):
     )
 
     with urllib.request.urlopen(req, timeout=300) as resp:
+        # Check content type - if not SSE, read as single JSON (MLX engine)
+        content_type = resp.headers.get("Content-Type", "")
+        if "text/event-stream" not in content_type:
+            raw_body = resp.read().decode("utf-8", errors="replace")
+            try:
+                data = json.loads(raw_body)
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                if content:
+                    yield content
+            except Exception:
+                pass
+            return
+
         buf = ""
         while True:
             ch = resp.read(1)
