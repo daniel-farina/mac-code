@@ -2228,6 +2228,7 @@ def main():
                             checker = SYNTAX_CHECKS.get(ext)
                             if checker is None and ext == ".html":
                                 try:
+                                    # Syntax check
                                     check = _sp.run(
                                         ["node", "-e", f"const h=require('fs').readFileSync('{fpath}','utf8');"
                                          "const m=h.match(/<script[^>]*>([\\s\\S]*?)<\\/script>/g)||[];"
@@ -2237,6 +2238,20 @@ def main():
                                         err = check.stderr.strip()[:500]
                                         console.print(f"  [bold yellow]![/] lint: {err[:200]}")
                                         lint_errors.append(f"Syntax error in {fpath}: {err}")
+                                except Exception:
+                                    pass
+                                # DOM cross-reference: check getElementById calls match actual IDs
+                                try:
+                                    with open(fpath, "r") as _f:
+                                        html = _f.read()
+                                    import re as _re
+                                    js_ids = set(_re.findall(r'getElementById\([\'"](\w+)[\'"]\)', html))
+                                    html_ids = set(_re.findall(r'id=[\'"](\w+)[\'"]', html))
+                                    missing = js_ids - html_ids
+                                    if missing:
+                                        msg = f"DOM mismatch in {os.path.basename(fpath)}: JS calls getElementById for {missing} but these IDs don't exist in the HTML. Add the missing elements."
+                                        console.print(f"  [bold yellow]![/] {msg[:200]}")
+                                        lint_errors.append(msg)
                                 except Exception:
                                     pass
                             elif checker:
