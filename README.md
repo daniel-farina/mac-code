@@ -137,6 +137,9 @@ Connect the agent to external tools via [Model Context Protocol](https://modelco
 
 ### Quick Start with Open WebMCP (Browser Automation)
 
+<img width="1898" height="1454" alt="image" src="https://github.com/user-attachments/assets/abfac894-a335-463b-96e8-bdd09ca200bb" />
+
+
 [Open WebMCP](https://github.com/daniel-farina/open-web-mcp) is an open-source MCP bridge that lets the agent control any website through Chrome. Navigate pages, read content, fill forms, click buttons, run JavaScript - 23 tools total.
 
 **Architecture:**
