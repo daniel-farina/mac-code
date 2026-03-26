@@ -236,8 +236,8 @@ def classify_intent(message):
 Categories:
 - search: needs web search (news, scores, weather, prices, current events, looking up info online)
 - shell: needs simple filesystem info or commands (find files, list directories, check disk space, quick one-line commands)
-- code: needs to write, create, edit, or fix code/programs/files (build a game, create an app, write a script, make a website, edit code, fix a bug, add a feature, refactor code, finish/continue code, generate any program).{mcp_hint}
-- chat: general conversation, reasoning, math, explanations (no file creation needed)
+- code: needs to write, create, edit, fix, run, or deploy code/programs/files (build a game, create an app, write a script, make a website, edit code, fix a bug, add a feature, refactor, run a dev server, start an app, npm install, npm run dev, run this command, start the server, deploy, build).{mcp_hint}
+- chat: general conversation, reasoning, math, explanations (no file creation or commands needed)
 
 Reply with ONLY one word: search, shell, code, or chat"""},
             {"role": "user", "content": message},
@@ -1110,6 +1110,8 @@ Rules:
 - Keep EDIT search text short (3-8 lines) and unique so it matches reliably.
 - For NEW files: use FILE with complete working code. No placeholders or TODOs.
 - For web apps: FILE to create, then RUN: open file.html
+- For Vite/npm projects: ALWAYS run npm install BEFORE npm run dev. Create package.json with FILE: first.
+- After starting a dev server, tell the user the URL (http://localhost:PORT).
 - For Python: FILE to create, then RUN: python3 file.py
 - If too long for one response, end with CONTINUE.
 - Keep explanations brief. Focus on code.
@@ -1392,16 +1394,43 @@ def execute_code_op(op, work_dir):
         if is_server:
             jid = bg_jobs.start(cmd_clean, cwd=work_dir)
             if jid:
-                # Wait a moment for the server to start, then check
-                time.sleep(3)
-                port = bg_jobs.jobs[jid].get("port")
-                alive = bg_jobs.jobs[jid]["process"].poll() is None
-                return {
-                    "type": "run_bg", "cmd": cmd_clean, "job_id": jid,
-                    "port": port, "alive": alive,
-                    "output": f"Started background job [{jid}]" + (f" on port {port}" if port else ""),
-                    "error": "" if alive else "Process exited immediately",
-                }
+                # Wait for server to start - check multiple times
+                port = bg_jobs.jobs[jid].get("port") or 5173  # default vite port
+                alive = False
+                for _ in range(10):  # check for up to 10 seconds
+                    time.sleep(1)
+                    if bg_jobs.jobs[jid]["process"].poll() is not None:
+                        break  # process died
+                    alive = True
+                    # Try to detect the port from output
+                    output_lines = bg_jobs.get_output(jid, lines=50) or []
+                    for line in output_lines:
+                        import re as _re
+                        port_match = _re.search(r'(?:localhost|127\.0\.0\.1):(\d{4,5})', line)
+                        if port_match:
+                            port = int(port_match.group(1))
+                            bg_jobs.jobs[jid]["port"] = port
+                            break
+                    if bg_jobs.jobs[jid].get("port"):
+                        break
+
+                if alive:
+                    url = f"http://localhost:{port}"
+                    return {
+                        "type": "run_bg", "cmd": cmd_clean, "job_id": jid,
+                        "port": port, "alive": True,
+                        "output": f"Server running at {url}\nBackground job [{jid}] (pid {bg_jobs.jobs[jid]['pid']})",
+                        "error": "",
+                    }
+                else:
+                    # Process died - capture output for error message
+                    err_lines = bg_jobs.get_output(jid, lines=20) or []
+                    bg_jobs.stop(jid)
+                    return {
+                        "type": "run", "cmd": cmd_clean,
+                        "output": "\n".join(err_lines)[:2000] if err_lines else "",
+                        "error": "Server process exited. Check if dependencies are installed (npm install).",
+                    }
             return {"type": "run", "cmd": cmd, "output": "", "error": "Failed to start background job"}
 
         try:
@@ -2415,7 +2444,10 @@ def main():
                                 if result["type"] == "run_bg":
                                     jid = result.get("job_id", "?")
                                     port = result.get("port")
-                                    console.print(f"  [bold bright_green]\u2713[/] background job [{jid}]" + (f" on port {port}" if port else ""))
+                                    if result.get("alive"):
+                                        console.print(f"  [bold bright_green]\u2713[/] server running at [bold bright_cyan]http://localhost:{port}[/]  (job [{jid}])")
+                                    else:
+                                        console.print(f"  [bold red]\u2717[/] server failed to start")
                                 if result.get("output"):
                                     for line in result["output"].split("\n")[:15]:
                                         console.print(f"    {line}")
