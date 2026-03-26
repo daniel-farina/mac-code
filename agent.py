@@ -2282,6 +2282,13 @@ def main():
                                             msg = f"Possible undefined functions in {os.path.basename(fpath)}: {missing_fns}. Make sure all called functions are defined."
                                             console.print(f"  [bold yellow]![/] {msg[:200]}")
                                             lint_errors.append(msg)
+                                        # Check for fetch/init functions defined but never called
+                                        async_fns = set(_re.findall(r'async\s+function\s+(\w+)', all_js))
+                                        uncalled = async_fns - called
+                                        if uncalled:
+                                            msg = f"Warning in {os.path.basename(fpath)}: async functions {uncalled} are defined but never called. Add initialization calls."
+                                            console.print(f"  [bold yellow]![/] {msg[:200]}")
+                                            lint_errors.append(msg)
                                 except Exception:
                                     pass
                             elif checker:
