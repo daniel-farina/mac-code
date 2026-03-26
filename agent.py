@@ -92,10 +92,10 @@ console = Console()
 MODELS = {
     "9b": {
         "path": os.path.expanduser("~/models/Qwen3.5-9B-Q4_K_M.gguf"),
-        "ctx": 32768,
+        "ctx": 65536,
         "flags": "--flash-attn on --n-gpu-layers 99 --reasoning off -t 4",
         "name": "Qwen3.5-9B",
-        "detail": "8.95B dense · Q4_K_M · 32K ctx",
+        "detail": "8.95B dense · Q4_K_M · 64K ctx",
         "good_for": "tool calling, long conversations, agent tasks",
     },
     "35b": {
@@ -1015,7 +1015,24 @@ Rules:
 - If too long for one response, end with CONTINUE.
 - Keep explanations brief. Focus on code.
 - For complex changes: make one focused EDIT at a time. You can do more EDITs in subsequent iterations.
-- NEVER output bare code blocks without FILE: or EDIT: markers. All code must use markers."""
+- NEVER output bare code blocks without FILE: or EDIT: markers. All code must use markers.
+
+CRITICAL - SAFE EDITS:
+- When editing inside a <script> block, do NOT include </script> in your replacement unless it was in your search text.
+- Keep EDITs small and focused. Insert new functions BETWEEN existing ones, don't replace entire blocks.
+- To add a function: search for the line BEFORE where you want to insert, and replace it with that same line PLUS your new function.
+- Example of SAFE insertion:
+  SEARCH: let allCoins = [];
+  REPLACE: let allCoins = [];
+           function myNewFunction() { ... }
+  This ADDS code after the existing line without removing anything.
+
+CRITICAL - LOGIC COMPLETENESS:
+- When adding UI elements (buttons, inputs, dropdowns), you MUST also add the JavaScript event listeners and handler functions in the SAME response.
+- Never add HTML without wiring up the JS. An unconnected button is a bug.
+- After adding interactive features, verify by adding a small EDIT that connects the event: addEventListener, onclick, onchange, etc.
+- If you add a function reference, make sure the function is defined. If you add an event listener, make sure the element exists.
+- Think through the data flow: where does data come from? Where is it stored? How do UI events trigger updates?"""
 
 
 def parse_code_ops(text):
@@ -2056,7 +2073,7 @@ def main():
                     chunk_tokens = 0
 
                     try:
-                        for chunk in stream_chat(code_msgs, max_tokens=8000, temperature=0.3):
+                        for chunk in stream_chat(code_msgs, max_tokens=16000, temperature=0.3):
                             console.print(chunk, end="", highlight=False)
                             chunk_response += chunk
                             chunk_tokens += 1
@@ -2114,7 +2131,50 @@ def main():
                         mcp_calls = [r for r in results if r["type"] == "mcp_call"]
 
                         if not errors and not truncated and not reads and not mcp_calls:
-                            break
+                            # Auto-verify: syntax check for edited code files
+                            code_files = [r for r in results if r["type"] in ("file_write", "file_edit") and r.get("path")]
+                            SYNTAX_CHECKS = {
+                                ".py": ["python3", "-m", "py_compile"],
+                                ".js": ["node", "--check"],
+                                ".ts": ["npx", "tsc", "--noEmit"],
+                                ".rb": ["ruby", "-c"],
+                                ".go": ["gofmt", "-e"],
+                                ".rs": ["rustfmt", "--check"],
+                                ".sh": ["bash", "-n"],
+                                ".html": None,  # special handling below
+                            }
+                            import subprocess as _sp
+                            for cf in code_files[:5]:
+                                fpath = cf["path"]
+                                ext = os.path.splitext(fpath)[1].lower()
+                                checker = SYNTAX_CHECKS.get(ext)
+                                if checker is None and ext == ".html":
+                                    # Check embedded JS in HTML
+                                    try:
+                                        check = _sp.run(
+                                            ["node", "-e", f"const h=require('fs').readFileSync('{fpath}','utf8');"
+                                             "const m=h.match(/<script[^>]*>([\\s\\S]*?)<\\/script>/g)||[];"
+                                             "m.forEach(s=>{{const c=s.replace(/<\\/?script[^>]*>/g,'');new Function(c)}})"],
+                                            capture_output=True, text=True, timeout=5)
+                                        if check.returncode != 0 and check.stderr:
+                                            err = check.stderr.strip()[:300]
+                                            console.print(f"  [bold yellow]![/] syntax issue: {err[:150]}")
+                                            errors.append({"error": f"Syntax error in {fpath}: {err}"})
+                                    except Exception:
+                                        pass
+                                elif checker:
+                                    try:
+                                        check = _sp.run(checker + [fpath], capture_output=True, text=True, timeout=5)
+                                        if check.returncode != 0:
+                                            err = (check.stderr or check.stdout).strip()[:300]
+                                            console.print(f"  [bold yellow]![/] syntax issue: {err[:150]}")
+                                            errors.append({"error": f"Syntax error in {fpath}: {err}"})
+                                    except FileNotFoundError:
+                                        pass  # checker not installed, skip
+                                    except Exception:
+                                        pass
+                            if not errors:
+                                break
 
                         # Build feedback for next iteration
                         feedback = []
