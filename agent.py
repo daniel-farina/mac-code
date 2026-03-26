@@ -2104,8 +2104,20 @@ def main():
                     pass
                 file_listing = "\n".join(project_files[:50]) if project_files else "(empty)"
 
+                # Load project-specific instructions (like CLAUDE.md / AGENTS.md)
+                project_instructions = ""
+                for name in ("AGENTS.md", ".mac-code.md", "CLAUDE.md"):
+                    agent_file = os.path.join(work_dir, name)
+                    if os.path.isfile(agent_file):
+                        try:
+                            with open(agent_file, "r") as f:
+                                project_instructions = f"\n\nProject instructions ({name}):\n{f.read(3000)}"
+                            break
+                        except Exception:
+                            pass
+
                 code_msgs = [
-                    {"role": "system", "content": f"Today is {today}. Working directory: {work_dir}\n\nProject files:\n{file_listing}\n\n{CODE_SYSTEM}{get_mcp_tool_descriptions()}"},
+                    {"role": "system", "content": f"Today is {today}. Working directory: {work_dir}\n\nProject files:\n{file_listing}{project_instructions}\n\n{CODE_SYSTEM}{get_mcp_tool_descriptions()}"},
                 ]
                 for msg in messages[-20:]:
                     code_msgs.append(msg)
