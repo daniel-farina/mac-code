@@ -25,6 +25,57 @@ MAX_ITERATIONS = int(os.environ.get("MAC_CODE_MAX_ITER", "100"))
 LOGS_DIR = Path.home() / ".mac-code" / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
+# ── Session persistence ──────────────────────────
+SESSIONS_DIR = Path.home() / ".mac-code" / "sessions"
+SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+def save_session(session_id, messages, metadata=None):
+    """Save conversation to disk."""
+    data = {
+        "session_id": session_id,
+        "messages": messages,
+        "metadata": metadata or {},
+        "saved_at": datetime.now().isoformat(),
+        "work_dir": os.getcwd(),
+    }
+    path = SESSIONS_DIR / f"{session_id}.json"
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    return path
+
+def load_session(session_id):
+    """Load a conversation from disk."""
+    path = SESSIONS_DIR / f"{session_id}.json"
+    if not path.exists():
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+def list_sessions(limit=10):
+    """List recent sessions sorted by date."""
+    sessions = []
+    for p in sorted(SESSIONS_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            with open(p) as f:
+                data = json.load(f)
+            first_msg = ""
+            for m in data.get("messages", []):
+                if m.get("role") == "user":
+                    first_msg = m["content"][:60]
+                    break
+            sessions.append({
+                "id": data["session_id"],
+                "date": data.get("saved_at", "")[:16],
+                "turns": len([m for m in data.get("messages", []) if m.get("role") == "user"]),
+                "preview": first_msg,
+                "work_dir": data.get("work_dir", ""),
+            })
+        except Exception:
+            pass
+        if len(sessions) >= limit:
+            break
+    return sessions
+
 # ── Background job manager ────────────────────────
 class BackgroundJobs:
     """Track background processes started by the agent (dev servers, builds, etc)."""
@@ -1110,7 +1161,10 @@ Rules:
 - Keep EDIT search text short (3-8 lines) and unique so it matches reliably.
 - For NEW files: use FILE with complete working code. No placeholders or TODOs.
 - For web apps: FILE to create, then RUN: open file.html
-- For Vite/npm projects: ALWAYS run npm install BEFORE npm run dev. Create package.json with FILE: first.
+- For Vite/npm projects: Use scaffold commands instead of writing files manually:
+  RUN: npm create vite@latest myapp -- --template vanilla
+  RUN: cd myapp && npm install
+  Then EDIT the generated files to customize. This is faster and more reliable than writing package.json by hand.
 - After starting a dev server, tell the user the URL (http://localhost:PORT).
 - For Python: FILE to create, then RUN: python3 file.py
 - If too long for one response, end with CONTINUE.
@@ -1665,11 +1719,13 @@ COMMANDS = [
     ("/stop",        "Stop a background job or /loop - /stop <id>"),
     ("/logs",        "Show recent output from a background job - /logs <id>"),
     ("/run",         "Start a background job - /run npm run dev"),
+    ("/sessions",    "List recent conversation sessions"),
+    ("/resume",      "Resume a previous session - /resume <session_id>"),
     ("/cost",        "Show estimated cost savings vs cloud APIs"),
     ("/good",        "Grade last response as good (for self-improvement)"),
     ("/bad",         "Grade last response as bad (for self-improvement)"),
     ("/improve",     "Show self-improvement stats from logged interactions"),
-    ("/quit",        "Exit mac code"),
+    ("/quit",        "Exit mac code (conversation auto-saved)"),
 ]
 
 def _slash_completer(text, state):
@@ -1750,6 +1806,11 @@ def main():
             user_input = input()
         except (EOFError, KeyboardInterrupt):
             console.print()
+            if messages:
+                save_session(session_id, messages, {
+                    "tokens": session_tokens, "time": session_time, "turns": session_turns
+                })
+                console.print(f"  [dim]session saved: {session_id}[/]")
             break
 
         if not user_input.strip():
@@ -1767,7 +1828,65 @@ def main():
             exact = cmd_lower.split()[0]
 
             if exact in ("/quit", "/exit", "/q"):
+                # Auto-save session on exit
+                if messages:
+                    save_session(session_id, messages, {
+                        "tokens": session_tokens, "time": session_time, "turns": session_turns
+                    })
+                    console.print(f"  [dim]session saved: {session_id}[/]")
                 break
+            elif exact == "/sessions":
+                sessions = list_sessions()
+                if not sessions:
+                    console.print("  [dim]no saved sessions[/]\n")
+                else:
+                    t = Table(show_header=True, box=None, padding=(0, 1))
+                    t.add_column("ID", style="bold bright_cyan", width=20)
+                    t.add_column("Date", width=18)
+                    t.add_column("Turns", width=6)
+                    t.add_column("Preview")
+                    for s in sessions:
+                        t.add_row(s["id"], s["date"], str(s["turns"]), s["preview"])
+                    console.print(t)
+                    console.print(f"\n  [dim]resume with: /resume <session_id>[/]\n")
+                continue
+            elif exact == "/resume":
+                parts = cmd.split()
+                if len(parts) < 2:
+                    # Show sessions and let user pick
+                    sessions = list_sessions(5)
+                    if not sessions:
+                        console.print("  [dim]no saved sessions[/]\n")
+                    else:
+                        for i, s in enumerate(sessions):
+                            console.print(f"  [bold bright_cyan]{s['id']}[/]  [dim]{s['date']}  {s['turns']} turns[/]  {s['preview']}")
+                        console.print(f"\n  [dim]/resume <session_id>[/]\n")
+                else:
+                    target_id = parts[1]
+                    # Support partial match
+                    matches = [p.stem for p in SESSIONS_DIR.glob(f"{target_id}*.json")]
+                    if len(matches) == 1:
+                        target_id = matches[0]
+                    data = load_session(target_id)
+                    if data:
+                        messages = data.get("messages", [])
+                        session_id = data["session_id"]
+                        session_turns = data.get("metadata", {}).get("turns", 0)
+                        prev_dir = data.get("work_dir")
+                        console.print(f"  [bold bright_green]\u2713[/] resumed session {session_id}")
+                        console.print(f"  [dim]{len(messages)} messages, {session_turns} turns[/]")
+                        if prev_dir and os.path.isdir(prev_dir):
+                            work_dir = prev_dir
+                            os.chdir(work_dir)
+                            console.print(f"  [dim]work dir: {work_dir}[/]")
+                        # Show last few messages as context
+                        recent = [m for m in messages if m.get("role") == "user"][-3:]
+                        for m in recent:
+                            console.print(f"  [dim]> {m['content'][:80]}[/]")
+                        console.print()
+                    else:
+                        console.print(f"  [bold red]session not found: {target_id}[/]\n")
+                continue
             elif exact == "/clear":
                 messages.clear()
                 session_id = f"mc-{int(time.time())}"
