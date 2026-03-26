@@ -1825,12 +1825,10 @@ def main():
 
     while True:
         try:
-            cur = get_current_model() or "?"
-            tag = f"{'auto' if auto_route else 'agent'} {cur}" if use_agent else "raw"
             bg_status = bg_jobs.render_status()
             if bg_status:
-                console.print(f"  [dim]{tag}[/] [dim cyan]{bg_status}[/]")
-            console.print(f"  [dim]{tag}[/] [bold bright_yellow]>[/] ", end="")
+                console.print(f"  [dim cyan]{bg_status}[/]")
+            console.print(f"  [bold bright_yellow]>[/] ", end="")
             user_input = input()
         except (EOFError, KeyboardInterrupt):
             console.print()
